@@ -19,9 +19,14 @@ distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
 - Commit Observation evidence before running TransitionPolicy or promotion logic. A later failure
   may not erase an Observation that was already obtained.
 - A valid state update, each new `WatchEvent`, and its outbox row share one SQLite transaction.
+- `TransitionPolicy.evaluate()` runs inside that SQLite write transaction. Keep it fast, pure, and
+  deterministic where practical. It must not perform network or external-service calls, send
+  notifications, block on I/O, mutate database-external state, or cause irreversible side effects.
+  External effects belong behind the Outbox in `EventSink`.
 - Runs may overlap during observation. Serialize promotion in SQLite and treat a VALID observation
   with `observed_at <= authority.observed_at` as evidence-only: never evaluate it, promote it, or
-  emit events from it.
+  emit events from it. Equal timestamps are conservative first-wins. Observers own the correctness,
+  timezone awareness, and sufficient precision of `observed_at`.
 - Every real transition occurrence gets a new `event_id`. Never make `(watch_id, dedupe_key)`
   permanently unique; state cycles can legitimately repeat a semantic transition.
 - Delivery is at least once. Retry the same stored event with its stable `event_id`; sinks are

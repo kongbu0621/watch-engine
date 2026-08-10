@@ -15,7 +15,9 @@ provider, or provide a distributed scheduler or web administration UI.
 - `Observation` is one piece of evidence with status `VALID`, `DEGRADED`, or `FAILED`.
 - The authoritative state is the newest `VALID` observation. A degraded or failed observation
   is retained for diagnosis but never replaces it.
-- `TransitionPolicy` alone understands domain state and returns `EventDraft` values.
+- `TransitionPolicy` alone understands domain state and returns `EventDraft` values. It is pure,
+  fast domain decision logic: no network, external-service access, blocking I/O, notifications,
+  database-external mutation, or other irreversible side effects.
 - `WatchEvent` is the engine-owned, durable v1 event envelope.
 - `EventSink` delivers events and must treat `event_id` as the retry idempotency key.
 
@@ -110,6 +112,13 @@ If policy evaluation or promotion fails, the second transaction rolls back Autho
 Outbox together while the already committed Observation remains available for diagnosis. Sink
 failures happen later and therefore cannot roll back or corrupt authority.
 
+`TransitionPolicy.evaluate(previous, current)` intentionally runs inside that SQLite write
+transaction so Previous Authority, the policy decision, Event/Outbox creation, and New Authority
+form one atomic promotion decision. A Policy must therefore be deterministic where practical and
+return quickly. It must not perform network requests, call external services, send notifications,
+block on I/O, modify state outside SQLite, or produce non-rollbackable side effects. Those effects
+belong in `EventSink`, after the Outbox transaction commits.
+
 Every event occurrence gets a new `event_id`, including a later repetition of the same transition.
 `dedupe_key` is domain correlation context and is intentionally not unique in the events table.
 Delivery retry reuses the stored event and stable `event_id`; it never creates a second event row.
@@ -149,7 +158,10 @@ SQLite and ordered by `Observation.observed_at`. A VALID observation whose times
 than or equal to current Authority is retained as evidence but is not passed to TransitionPolicy,
 does not replace Authority, and cannot create an event. Observers must therefore assign an aware
 timestamp that represents when their evidence was obtained. If callers invoke the same Observer
-concurrently, that Observer is responsible for its own thread safety.
+concurrently, that Observer is responsible for its own thread safety. Equal timestamps use a
+conservative first-wins rule: the already promoted Authority remains authoritative and the later
+completion is evidence-only. Timestamps must be timezone-aware and precise enough to order the
+Observer's real evidence.
 
 The trigger adapter is async, but v0.1 does not include a daemon CLI, process supervisor,
 distributed scheduler, dynamic plugin loader, PostgreSQL, Redis, or a message broker.

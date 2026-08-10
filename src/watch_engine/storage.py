@@ -291,6 +291,8 @@ class SQLiteStore:
                     )
                     return ()
 
+                # Policy is deliberately inside this atomic promotion decision. Its
+                # public contract therefore requires fast, pure, side-effect-free work.
                 drafts = policy.evaluate(previous, observation)
                 created_events = self._insert_events(
                     connection, watch_id, observation, drafts, now
