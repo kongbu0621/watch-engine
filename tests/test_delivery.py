@@ -100,7 +100,8 @@ def test_stable_event_id_supports_downstream_dedupe_after_crash(tmp_path: Path) 
 
 
 def test_state_cycle_can_create_same_transition_again(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
     definition = WatchDefinition(
         watch_id="dedupe-watch",
         trigger=ManualTrigger(),
@@ -119,15 +120,47 @@ def test_state_cycle_can_create_same_transition_again(tmp_path: Path) -> None:
     runtime.run_once(definition)
     first = runtime.run_once(definition)
     second = runtime.run_once(definition)
-    third = runtime.run_once(definition)
 
     assert len(first.events) == 1
     assert len(second.events) == 1
+    sink = RecordingSink()
+    delivered = OutboxDispatcher(store, sink, clock=lambda: NOW).dispatch_ready()
+    assert [result.event_id for result in delivered] == [
+        first.events[0].event_id,
+        second.events[0].event_id,
+    ]
+
+    third = runtime.run_once(definition)
     assert len(third.events) == 1
     assert first.events[0].dedupe_key == third.events[0].dedupe_key
     assert first.events[0].event_id != third.events[0].event_id
-    assert len(store.list_events("dedupe-watch")) == 3
-    assert len(store.outbox_rows()) == 3
+
+    claimed = store.claim_due(now=NOW)
+    assert [item.event.event_id for item in claimed] == [third.events[0].event_id]
+    sink.deliver(claimed[0].event)
+    # Crash after E3 reaches the sink but before its outbox acknowledgement.
+    del runtime, store
+
+    reopened_store = SQLiteStore(database, clock=lambda: NOW)
+    retried = OutboxDispatcher(reopened_store, sink, clock=lambda: NOW).dispatch_ready()
+    assert [result.event_id for result in retried] == [third.events[0].event_id]
+    assert sink.calls == [
+        first.events[0].event_id,
+        second.events[0].event_id,
+        third.events[0].event_id,
+        third.events[0].event_id,
+    ]
+    assert sink.processed == [
+        first.events[0].event_id,
+        second.events[0].event_id,
+        third.events[0].event_id,
+    ]
+    assert len(reopened_store.list_events("dedupe-watch")) == 3
+    assert [row["status"] for row in reopened_store.outbox_rows()] == [
+        "DELIVERED",
+        "DELIVERED",
+        "DELIVERED",
+    ]
 
 
 def test_delivery_stops_at_explicit_attempt_limit(tmp_path: Path) -> None:

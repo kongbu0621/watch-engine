@@ -8,7 +8,7 @@ from threading import Event
 
 import pytest
 
-from tests.helpers import NoEventsPolicy, SequenceObserver, StateChangePolicy
+from tests.helpers import MultiEventPolicy, NoEventsPolicy, SequenceObserver, StateChangePolicy
 from watch_engine import (
     EventDraft,
     ManualTrigger,
@@ -136,14 +136,39 @@ def test_equal_timestamp_valid_observation_is_evidence_only(tmp_path: Path) -> N
 
 
 class FaultyOutboxStore(SQLiteStore):
+    outbox_insert_count = 0
+
     def _insert_outbox(
         self, connection: sqlite3.Connection, event_id: str, now: datetime
     ) -> None:
-        raise sqlite3.OperationalError("simulated outbox failure")
+        self.outbox_insert_count += 1
+        if self.outbox_insert_count == 2:
+            raise sqlite3.OperationalError("simulated second outbox failure")
+        super()._insert_outbox(connection, event_id, now)
 
 
-def test_event_outbox_and_authority_update_are_atomic(tmp_path: Path) -> None:
-    store = FaultyOutboxStore(tmp_path / "watch.db", clock=lambda: NOW)
+def test_multi_event_promotion_is_all_or_nothing(tmp_path: Path) -> None:
+    normal_store = SQLiteStore(tmp_path / "normal.db", clock=lambda: NOW)
+    normal_runtime = WatchRuntime(normal_store, clock=lambda: NOW)
+    normal_definition = make_definition(
+        SequenceObserver(
+            [
+                Observation.valid("A", observed_at=NOW),
+                Observation.valid("B", observed_at=NOW.replace(second=1)),
+            ]
+        ),
+        MultiEventPolicy(),
+    )
+    normal_runtime.run_once(normal_definition)
+    normal_result = normal_runtime.run_once(normal_definition)
+
+    assert len(normal_result.events) == 3
+    assert len(normal_store.list_events("example")) == 3
+    assert len(normal_store.outbox_rows()) == 3
+    normal_authority = normal_store.get_authoritative_observation("example")
+    assert normal_authority is not None and normal_authority.state == "B"
+
+    store = FaultyOutboxStore(tmp_path / "fault.db", clock=lambda: NOW)
     runtime = WatchRuntime(store, clock=lambda: NOW)
     definition = make_definition(
         SequenceObserver(
@@ -151,11 +176,12 @@ def test_event_outbox_and_authority_update_are_atomic(tmp_path: Path) -> None:
                 Observation.valid("A", observed_at=NOW),
                 Observation.valid("B", observed_at=NOW.replace(second=1)),
             ]
-        )
+        ),
+        MultiEventPolicy(),
     )
     runtime.run_once(definition)
 
-    with pytest.raises(sqlite3.OperationalError, match="simulated outbox failure"):
+    with pytest.raises(sqlite3.OperationalError, match="simulated second outbox failure"):
         runtime.run_once(definition)
 
     authoritative = store.get_authoritative_observation("example")
@@ -175,7 +201,8 @@ class ExplodingTransitionPolicy:
 
 
 def test_policy_failure_preserves_observation_but_not_promotion(tmp_path: Path) -> None:
-    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
     runtime = WatchRuntime(store, clock=lambda: NOW)
     definition = make_definition(
         SequenceObserver(
@@ -197,6 +224,28 @@ def test_policy_failure_preserves_observation_but_not_promotion(tmp_path: Path) 
     assert store.list_events("example") == []
     assert store.outbox_rows() == []
 
+    del runtime, store
+    reopened_store = SQLiteStore(database, clock=lambda: NOW)
+    recovered_result = WatchRuntime(reopened_store, clock=lambda: NOW).run_once(
+        make_definition(
+            SequenceObserver(
+                [Observation.valid("B", observed_at=NOW.replace(second=2))]
+            ),
+            StateChangePolicy(),
+        )
+    )
+
+    assert len(recovered_result.events) == 1
+    assert recovered_result.events[0].payload == {"previous": "A", "current": "B"}
+    assert [item.state for item in reopened_store.list_observations("example")] == [
+        "A",
+        "B",
+        "B",
+    ]
+    recovered_authority = reopened_store.get_authoritative_observation("example")
+    assert recovered_authority is not None and recovered_authority.state == "B"
+    assert len(reopened_store.outbox_rows()) == 1
+
 
 class BlockingObserver:
     def __init__(self, observation: Observation, started: Event, release: Event) -> None:
@@ -211,11 +260,25 @@ class BlockingObserver:
         return self.observation
 
 
+class RecordingStateChangePolicy(StateChangePolicy):
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object]] = []
+
+    def evaluate(
+        self, previous: Observation | None, current: Observation
+    ) -> list[EventDraft]:
+        self.calls.append((previous.state if previous else None, current.state))
+        return super().evaluate(previous, current)
+
+
 def test_older_overlapping_run_is_evidence_only(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     runtime = WatchRuntime(store, clock=lambda: NOW)
+    policy = RecordingStateChangePolicy()
     runtime.run_once(
-        make_definition(SequenceObserver([Observation.valid("BASE", observed_at=NOW)]))
+        make_definition(
+            SequenceObserver([Observation.valid("BASE", observed_at=NOW)]), policy
+        )
     )
 
     old_started = Event()
@@ -228,31 +291,48 @@ def test_older_overlapping_run_is_evidence_only(tmp_path: Path) -> None:
             old_started,
             release_old,
         ),
-        transition_policy=StateChangePolicy(),
+        transition_policy=policy,
     )
     new_definition = make_definition(
         SequenceObserver(
             [Observation.valid("NEW", observed_at=NOW.replace(second=2))]
-        )
+        ),
+        policy,
+    )
+    degraded_definition = make_definition(
+        SequenceObserver(
+            [
+                Observation.degraded(
+                    observed_at=NOW.replace(second=3), error="temporary ambiguity"
+                )
+            ]
+        ),
+        policy,
     )
 
     with ThreadPoolExecutor(max_workers=1) as executor:
         older_future = executor.submit(runtime.run_once, old_definition)
         assert old_started.wait(timeout=2)
         newer_result = runtime.run_once(new_definition)
+        degraded_result = runtime.run_once(degraded_definition)
         release_old.set()
         older_result = older_future.result(timeout=2)
 
     assert len(newer_result.events) == 1
+    assert degraded_result.events == ()
     assert newer_result.events[0].payload == {"previous": "BASE", "current": "NEW"}
     assert older_result.events == ()
     authoritative = store.get_authoritative_observation("example")
     assert authoritative is not None and authoritative.state == "NEW"
-    assert [item.state for item in store.list_observations("example")] == [
-        "BASE",
-        "NEW",
-        "OLD",
+    observations = store.list_observations("example")
+    assert [item.status for item in observations] == [
+        ObservationStatus.VALID,
+        ObservationStatus.VALID,
+        ObservationStatus.DEGRADED,
+        ObservationStatus.VALID,
     ]
+    assert [item.state for item in observations] == ["BASE", "NEW", None, "OLD"]
+    assert policy.calls == [(None, "BASE"), ("BASE", "NEW")]
     assert [event.payload for event in store.list_events("example")] == [
         {"previous": "BASE", "current": "NEW"}
     ]

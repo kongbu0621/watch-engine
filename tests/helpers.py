@@ -38,3 +38,23 @@ class NoEventsPolicy:
         self, previous: Observation | None, current: Observation
     ) -> list[EventDraft]:
         return []
+
+
+class MultiEventPolicy:
+    """Emit three independent events for one accepted state transition."""
+
+    def evaluate(
+        self, previous: Observation | None, current: Observation
+    ) -> list[EventDraft]:
+        if previous is None or previous.state == current.state:
+            return []
+        return [
+            EventDraft(
+                event_type=f"state.changed.{index}",
+                severity="info",
+                dedupe_key=f"{previous.state!r}->{current.state!r}:{index}",
+                subject={"kind": "test-resource", "channel": index},
+                payload={"previous": previous.state, "current": current.state},
+            )
+            for index in range(1, 4)
+        ]
