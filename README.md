@@ -1,5 +1,7 @@
 # watch-engine
 
+English | [简体中文](README.zh-CN.md)
+
 `watch-engine` is a reusable Python 3.11+ condition-watch runtime. It schedules observations,
 preserves trustworthy state, asks domain code to interpret transitions, persists resulting
 events, and delivers them through a transactional outbox.
