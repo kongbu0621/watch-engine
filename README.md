@@ -17,7 +17,7 @@ provider, or provide a distributed scheduler or web administration UI.
   is retained for diagnosis but never replaces it.
 - `TransitionPolicy` alone understands domain state and returns `EventDraft` values.
 - `WatchEvent` is the engine-owned, durable v1 event envelope.
-- `EventSink` delivers events and must treat `event_id` or `dedupe_key` as an idempotency key.
+- `EventSink` delivers events and must treat `event_id` as the retry idempotency key.
 
 This distinction is fundamental: an observation failure says the engine could not confidently
 observe the subject. It does not say the subject changed state. After any number of non-valid
@@ -99,18 +99,23 @@ uses ordinary cron expressions and requires an explicit timezone.
 `SQLiteStore` initializes schema version 1 automatically. It keeps watch run metadata, every
 observation, the authoritative observation, events, outbox rows, and every delivery attempt.
 
-For a valid observation, policy evaluation and these writes share one `BEGIN IMMEDIATE`
-transaction:
+Persistence deliberately has two transaction boundaries:
 
-1. persist the observation;
-2. insert any new event (unique by `watch_id + dedupe_key`);
-3. insert its pending outbox row;
-4. replace the authoritative pointer and state.
+1. Every completed Observation is first committed as evidence, together with diagnostic watch
+   run metadata.
+2. For a non-stale VALID Observation, a separate `BEGIN IMMEDIATE` transaction evaluates the
+   policy, replaces Authority, and inserts each WatchEvent with its Outbox row.
 
-Any failure rolls all four operations back. Sink failures happen later and therefore cannot
-roll back or corrupt authority. Delivery is intentionally **at least once**. A process can die
+If policy evaluation or promotion fails, the second transaction rolls back Authority, Event, and
+Outbox together while the already committed Observation remains available for diagnosis. Sink
+failures happen later and therefore cannot roll back or corrupt authority.
+
+Every event occurrence gets a new `event_id`, including a later repetition of the same transition.
+`dedupe_key` is domain correlation context and is intentionally not unique in the events table.
+Delivery retry reuses the stored event and stable `event_id`; it never creates a second event row.
+Delivery is intentionally **at least once**. A process can die
 after a sink accepts an event but before SQLite records success; the next process will send the
-same stored `event_id` again. Sinks must deduplicate it. Failed attempts use configurable,
+same stored `event_id` again. Sinks must deduplicate by `event_id`. Failed attempts use configurable,
 bounded exponential backoff and survive restart. Exhausted events remain as `DEAD` diagnostics.
 
 Observer exceptions are retried within a run using the watch's bounded retry policy. When the
@@ -137,9 +142,17 @@ The test suite is entirely local and requires no network or third-party service.
 ## v0.1 boundaries
 
 The runtime is intentionally single-node and synchronous at the observer/sink boundary. SQLite
-coordinates local transactions; it is not a distributed lock. The trigger adapter is async, but
-v0.1 does not include a daemon CLI, process supervisor, distributed scheduler, dynamic plugin
-loader, PostgreSQL, Redis, or a message broker.
+coordinates local transactions; it is not a distributed lock.
+
+Runs for one `watch_id` may overlap at the Observer stage. Authority promotion is serialized by
+SQLite and ordered by `Observation.observed_at`. A VALID observation whose timestamp is older
+than or equal to current Authority is retained as evidence but is not passed to TransitionPolicy,
+does not replace Authority, and cannot create an event. Observers must therefore assign an aware
+timestamp that represents when their evidence was obtained. If callers invoke the same Observer
+concurrently, that Observer is responsible for its own thread safety.
+
+The trigger adapter is async, but v0.1 does not include a daemon CLI, process supervisor,
+distributed scheduler, dynamic plugin loader, PostgreSQL, Redis, or a message broker.
 
 Implemented triggers are jittered intervals, cron schedules, and in-process manual requests.
 Potential later adapters include external events, file changes, and webhooks without changing the

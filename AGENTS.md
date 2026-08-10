@@ -16,9 +16,17 @@ distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
   authoritative state.
 - Never silently treat `DEGRADED` or `FAILED` as a domain transition. The next valid state compares
   with the last authoritative valid state.
+- Commit Observation evidence before running TransitionPolicy or promotion logic. A later failure
+  may not erase an Observation that was already obtained.
 - A valid state update, each new `WatchEvent`, and its outbox row share one SQLite transaction.
-- Delivery is at least once. Preserve stable `event_id` and `dedupe_key`; sinks are responsible
-  for idempotent downstream processing.
+- Runs may overlap during observation. Serialize promotion in SQLite and treat a VALID observation
+  with `observed_at <= authority.observed_at` as evidence-only: never evaluate it, promote it, or
+  emit events from it.
+- Every real transition occurrence gets a new `event_id`. Never make `(watch_id, dedupe_key)`
+  permanently unique; state cycles can legitimately repeat a semantic transition.
+- Delivery is at least once. Retry the same stored event with its stable `event_id`; sinks are
+  responsible for idempotent downstream processing by `event_id`. `dedupe_key` is domain context,
+  not lifetime event identity.
 - Delivery failure must not roll back or modify authoritative state.
 - Keep retry attempt counts and delay caps explicit, injectable, and tested.
 - Use timezone-aware UTC datetimes and deterministic JSON serialization.

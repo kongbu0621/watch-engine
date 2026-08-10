@@ -82,7 +82,7 @@ class Observation:
 
 @dataclass(frozen=True, slots=True)
 class EventDraft:
-    """Domain policy output; the engine supplies identity and timing metadata."""
+    """Domain policy output; dedupe_key is context, not global event uniqueness."""
 
     event_type: str
     severity: str

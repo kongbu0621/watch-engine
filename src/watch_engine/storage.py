@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ from watch_engine._json import decode_json, encode_json
 from watch_engine._time import from_iso, to_iso, utc_now
 from watch_engine.interfaces import TransitionPolicy
 from watch_engine.models import EventDraft, Observation, ObservationStatus, WatchEvent
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +106,10 @@ class SQLiteStore:
                     subject_json TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    UNIQUE(watch_id, dedupe_key),
                     FOREIGN KEY(watch_id) REFERENCES watches(watch_id)
                 );
+                CREATE INDEX IF NOT EXISTS idx_events_watch_dedupe
+                    ON events(watch_id, dedupe_key);
 
                 CREATE TABLE IF NOT EXISTS outbox (
                     outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,14 +202,32 @@ class SQLiteStore:
         *,
         now: datetime | None = None,
     ) -> tuple[WatchEvent, ...]:
-        """Atomically persist observation, authority, events, and outbox rows."""
+        """Persist evidence first, then atomically promote eligible valid evidence.
+
+        Observation evidence survives any later policy or promotion failure. For a
+        non-stale VALID observation, authority, events, and outbox rows are one
+        independent transaction.
+        """
         timestamp = now or self._clock()
         observation_id = self._observation_id_factory()
-        created_events: list[WatchEvent] = []
+        self._persist_observation(watch_id, observation_id, observation, timestamp)
+        if observation.status is not ObservationStatus.VALID:
+            return ()
+        return self._promote_valid_observation(
+            watch_id, observation_id, observation, policy, timestamp
+        )
+
+    def _persist_observation(
+        self,
+        watch_id: str,
+        observation_id: str,
+        observation: Observation,
+        now: datetime,
+    ) -> None:
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                self._ensure_watch(connection, watch_id, timestamp)
+                self._ensure_watch(connection, watch_id, now)
                 connection.execute(
                     """
                     INSERT INTO observations(
@@ -221,36 +243,9 @@ class SQLiteStore:
                         encode_json(observation.state),
                         encode_json(observation.evidence),
                         observation.error,
-                        to_iso(timestamp),
+                        to_iso(now),
                     ),
                 )
-
-                if observation.status is ObservationStatus.VALID:
-                    previous = self._read_authoritative(connection, watch_id)
-                    drafts = policy.evaluate(previous, observation)
-                    created_events.extend(
-                        self._insert_events(connection, watch_id, observation, drafts, timestamp)
-                    )
-                    connection.execute(
-                        """
-                        INSERT INTO authoritative_states(
-                            watch_id, observation_id, state_json, observed_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?)
-                        ON CONFLICT(watch_id) DO UPDATE SET
-                            observation_id = excluded.observation_id,
-                            state_json = excluded.state_json,
-                            observed_at = excluded.observed_at,
-                            updated_at = excluded.updated_at
-                        """,
-                        (
-                            watch_id,
-                            observation_id,
-                            encode_json(observation.state),
-                            to_iso(observation.observed_at),
-                            to_iso(timestamp),
-                        ),
-                    )
-
                 connection.execute(
                     """
                     UPDATE watches
@@ -260,11 +255,63 @@ class SQLiteStore:
                     WHERE watch_id = ?
                     """,
                     (
-                        to_iso(timestamp),
+                        to_iso(now),
                         observation.status.value,
                         observation.error,
-                        to_iso(timestamp),
+                        to_iso(now),
                         watch_id,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _promote_valid_observation(
+        self,
+        watch_id: str,
+        observation_id: str,
+        observation: Observation,
+        policy: TransitionPolicy,
+        now: datetime,
+    ) -> tuple[WatchEvent, ...]:
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                previous = self._read_authoritative(connection, watch_id)
+                if previous is not None and observation.observed_at <= previous.observed_at:
+                    connection.commit()
+                    logger.info(
+                        "stale valid observation retained without authority promotion",
+                        extra={
+                            "watch_id": watch_id,
+                            "observed_at": to_iso(observation.observed_at),
+                            "authority_observed_at": to_iso(previous.observed_at),
+                        },
+                    )
+                    return ()
+
+                drafts = policy.evaluate(previous, observation)
+                created_events = self._insert_events(
+                    connection, watch_id, observation, drafts, now
+                )
+                connection.execute(
+                    """
+                    INSERT INTO authoritative_states(
+                        watch_id, observation_id, state_json, observed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(watch_id) DO UPDATE SET
+                        observation_id = excluded.observation_id,
+                        state_json = excluded.state_json,
+                        observed_at = excluded.observed_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        watch_id,
+                        observation_id,
+                        encode_json(observation.state),
+                        to_iso(observation.observed_at),
+                        to_iso(now),
                     ),
                 )
                 connection.commit()
@@ -294,13 +341,12 @@ class SQLiteStore:
                 subject=draft.subject,
                 payload=draft.payload,
             )
-            cursor = connection.execute(
+            connection.execute(
                 """
                 INSERT INTO events(
                     event_id, watch_id, schema_version, event_type, severity, occurred_at,
                     dedupe_key, subject_json, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(watch_id, dedupe_key) DO NOTHING
                 """,
                 (
                     event.event_id,
@@ -315,9 +361,8 @@ class SQLiteStore:
                     to_iso(now),
                 ),
             )
-            if cursor.rowcount == 1:
-                self._insert_outbox(connection, event.event_id, now)
-                created.append(event)
+            self._insert_outbox(connection, event.event_id, now)
+            created.append(event)
         return created
 
     def _insert_outbox(

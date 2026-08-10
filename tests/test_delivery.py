@@ -43,7 +43,7 @@ def make_pending_event(store: SQLiteStore) -> WatchEvent:
         observer=SequenceObserver(
             [
                 Observation.valid("A", observed_at=NOW),
-                Observation.valid("B", observed_at=NOW),
+                Observation.valid("B", observed_at=NOW.replace(second=1)),
             ]
         ),
         transition_policy=StateChangePolicy(),
@@ -99,23 +99,7 @@ def test_stable_event_id_supports_downstream_dedupe_after_crash(tmp_path: Path) 
     assert sink.processed == [event.event_id]
 
 
-def test_duplicate_dedupe_key_creates_only_one_durable_event(tmp_path: Path) -> None:
-    class ConstantDedupePolicy(StateChangePolicy):
-        def evaluate(self, previous: Observation | None, current: Observation):  # type: ignore[no-untyped-def]
-            drafts = super().evaluate(previous, current)
-            if drafts:
-                draft = drafts[0]
-                return [
-                    type(draft)(
-                        event_type=draft.event_type,
-                        severity=draft.severity,
-                        dedupe_key="one-logical-change",
-                        subject=draft.subject,
-                        payload=draft.payload,
-                    )
-                ]
-            return []
-
+def test_state_cycle_can_create_same_transition_again(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     definition = WatchDefinition(
         watch_id="dedupe-watch",
@@ -123,22 +107,27 @@ def test_duplicate_dedupe_key_creates_only_one_durable_event(tmp_path: Path) -> 
         observer=SequenceObserver(
             [
                 Observation.valid("A", observed_at=NOW),
-                Observation.valid("B", observed_at=NOW),
-                Observation.valid("C", observed_at=NOW),
+                Observation.valid("B", observed_at=NOW.replace(second=1)),
+                Observation.valid("A", observed_at=NOW.replace(second=2)),
+                Observation.valid("B", observed_at=NOW.replace(second=3)),
             ]
         ),
-        transition_policy=ConstantDedupePolicy(),
+        transition_policy=StateChangePolicy(),
     )
     runtime = WatchRuntime(store, clock=lambda: NOW)
 
     runtime.run_once(definition)
     first = runtime.run_once(definition)
     second = runtime.run_once(definition)
+    third = runtime.run_once(definition)
 
     assert len(first.events) == 1
-    assert second.events == ()
-    assert len(store.list_events("dedupe-watch")) == 1
-    assert len(store.outbox_rows()) == 1
+    assert len(second.events) == 1
+    assert len(third.events) == 1
+    assert first.events[0].dedupe_key == third.events[0].dedupe_key
+    assert first.events[0].event_id != third.events[0].event_id
+    assert len(store.list_events("dedupe-watch")) == 3
+    assert len(store.outbox_rows()) == 3
 
 
 def test_delivery_stops_at_explicit_attempt_limit(tmp_path: Path) -> None:

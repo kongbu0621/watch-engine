@@ -52,7 +52,10 @@ class WatchRuntime:
             )
         except Exception as exc:
             self.store.mark_run_error(definition.watch_id, str(exc), now=self._clock())
-            logger.exception("watch transaction failed", extra={"watch_id": definition.watch_id})
+            logger.exception(
+                "observation persistence or promotion failed",
+                extra={"watch_id": definition.watch_id},
+            )
             raise
         return RunResult(observation=observation, events=events)
 
