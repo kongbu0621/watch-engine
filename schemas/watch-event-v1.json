@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kongbu0621/watch-engine/schemas/watch-event-v1.json",
+  "title": "WatchEvent v1",
+  "description": "Stable cross-project event contract emitted by watch-engine v0.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "watch_id",
+    "event_type",
+    "severity",
+    "occurred_at",
+    "dedupe_key",
+    "subject",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "event_id": { "type": "string", "minLength": 1 },
+    "watch_id": { "type": "string", "minLength": 1 },
+    "event_type": { "type": "string", "minLength": 1 },
+    "severity": { "type": "string", "minLength": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "dedupe_key": { "type": "string", "minLength": 1 },
+    "subject": { "type": "object" },
+    "payload": { "type": "object" }
+  }
+}
