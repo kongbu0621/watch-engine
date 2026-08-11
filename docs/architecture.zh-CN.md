@@ -4,7 +4,7 @@
 
 本文描述 `watch-engine` v0.1 的程序架构、模块边界、核心对象、执行流程、持久化事务、并发与失败语义，以及对下游保持稳定的集成契约。
 
-需求依据见 [模块需求说明](module-requirements.zh-CN.md)，实际接入步骤见 [采用指南](adoption-guide.zh-CN.md)。
+需求依据见 [模块需求说明](module-requirements.zh-CN.md)，当前版本的具体代码与数据落地见 [实际落地技术方案](implementation.zh-CN.md)，下游接入步骤见 [采用指南](adoption-guide.zh-CN.md)。
 
 ## 2. 架构目标
 
