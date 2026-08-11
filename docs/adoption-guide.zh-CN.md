@@ -2,7 +2,7 @@
 
 ## 1. 适用范围
 
-本文面向准备在独立工程或功能模块中采用 `watch-engine` 的开发者。
+本文面向准备在独立工程或功能模块中采用 `watch-engine` 的开发者。模块目标见 [模块需求说明](module-requirements.zh-CN.md)，总体结构见 [架构设计](architecture.zh-CN.md)，当前版本的内部实现见 [实际落地技术方案](implementation.zh-CN.md)。
 
 采用者不需要修改引擎核心，只需：
 
