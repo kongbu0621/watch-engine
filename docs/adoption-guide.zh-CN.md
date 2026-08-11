@@ -231,13 +231,17 @@ result = runtime.run_once(definition)
 等待 Trigger 后运行一次：
 
 ```python
+import asyncio
+
 from watch_engine import WatchRunner
 
 runner = WatchRunner(runtime)
-result = await runner.run_next(definition)
+result = asyncio.run(runner.run_next(definition))
 ```
 
 下游可以在自己的应用循环中反复调用，但不得假设引擎 v0.1 自带 daemon 或 systemd 配置。
+如果代码本来已经运行在 asyncio Event Loop 中，应在 `async def` 内直接 `await`，不要再次调用
+`asyncio.run()`。
 
 ## 10. 第六步：运行 Outbox Dispatcher
 
@@ -248,7 +252,14 @@ dispatcher = OutboxDispatcher(store, NotificationSink(client))
 delivery_results = dispatcher.dispatch_ready()
 ```
 
-Runtime 与 Dispatcher 可以由同一进程的两个循环驱动，也可以由同一主机上的独立进程驱动。具体方式由下游负责，但必须遵守 v0.1 单节点边界。
+Runtime 与 Dispatcher 可以由同一进程的两个循环驱动，也可以由同一主机上的独立进程驱动。具体
+方式由下游负责，但必须遵守 v0.1 单节点边界，并保证一个 SQLite 数据库同一时刻只有一个活跃的
+Dispatcher。不要用多个 Dispatcher 进程并行提高吞吐；新 Dispatcher 启动时会把遗留
+`DELIVERING` 视为上一个投递进程已经中断。
+
+`WatchRunner.serve()` 只在两次运行之间检查 stop event。若它正在等待长 Interval/Cron，设置 stop
+不会立即唤醒等待；要求及时停机时，下游应取消外层 asyncio Task 或实现自己的信号/超时编排，并
+等待已经进入 `run_once()` 的同步工作和 SQLite 事务安全结束。
 
 ## 11. 完整最小结构
 
@@ -314,10 +325,12 @@ your-monitor/
 
 ## 13. 跨工程事件消费
 
-当事件离开 Python 进程或被其他模块消费时，应按：
+当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.0` 的 wheel
+没有携带仓库根目录下的 Schema，因此不能假设安装 Python 包后存在本地
+`schemas/watch-event-v1.json`。应从 Release Tag 获取并随消费者固定保存：
 
 ```text
-schemas/watch-event-v1.json
+https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-event-v1.json
 ```
 
 验证，而不是：
@@ -325,6 +338,7 @@ schemas/watch-event-v1.json
 - import 引擎内部数据库模型；
 - 直接读取 SQLite 表；
 - 根据 README 示例猜测字段；
+- 每次运行时读取会变化的 `main` 分支 Schema；
 - 使用 `dedupe_key` 替代 `event_id`。
 
 消费者应保留未知的可选字段，并明确记录自己支持的 Schema 版本。

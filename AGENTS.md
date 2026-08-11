@@ -33,6 +33,10 @@ distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
   responsible for idempotent downstream processing by `event_id`. `dedupe_key` is domain context,
   not lifetime event identity.
 - Delivery failure must not roll back or modify authoritative state.
+- v0.1 permits only one active OutboxDispatcher owner per SQLite database. A new dispatcher
+  recovers every `DELIVERING` row and therefore must start only after the old owner has exited.
+- `WatchRunner.serve()` stop is cooperative between runs; it does not wake a pending trigger or
+  terminate synchronous work already handed to `asyncio.to_thread`.
 - Keep retry attempt counts and delay caps explicit, injectable, and tested.
 - Use timezone-aware UTC datetimes and deterministic JSON serialization.
 
@@ -45,6 +49,19 @@ never silently rewrite v1 semantics. Internal Python models are not the cross-pr
 Database evolution starts at `SQLiteStore.SCHEMA_VERSION`. v0.1 has no migration framework, but
 schema changes must detect unsupported versions rather than reinterpret existing data.
 
+## Documentation baseline
+
+This is a program repository. Keep all three mandatory document layers current:
+
+1. product/module requirements: why, users, required behavior, boundaries, and acceptance;
+2. technical architecture: components, dependencies, data flow, invariants, and design rationale;
+3. concrete implementation: file/class/schema/config/test/CI/deployment/release mapping and status.
+
+Because `watch-engine` is independently reusable, also maintain a downstream adoption guide.
+Code, schema, packaging, runtime, deployment, release, or public-contract changes must update the
+affected document layer in the same change. Never describe a future plan as already implemented or
+an already published release as pending.
+
 ## Required checks
 
 Run all commands before proposing a change:
@@ -53,6 +70,7 @@ Run all commands before proposing a change:
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m build
 ```
 
 Tests must not use external networks or real third-party services. Add focused tests for any

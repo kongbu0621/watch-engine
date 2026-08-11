@@ -208,9 +208,12 @@ Clock 和 sleep 均可注入，便于测试时间与重试行为。
 
 - `run_next()` 等待 `Trigger.wait_next()`；
 - 使用 `asyncio.to_thread` 执行同步 `run_once()`，避免阻塞 asyncio Event Loop；
-- `serve()` 循环运行，直到外部 `asyncio.Event` 被设置。
+- `serve()` 在每次运行开始前检查外部 `asyncio.Event`。
 
 `WatchRunner` 不是操作系统 daemon。进程生命周期、信号处理和服务监督由下游程序负责。
+stop event 不会中断一个已经开始的 `Trigger.wait_next()`；长 Interval/Cron 的及时停机需要下游取消
+外层 asyncio Task 或增加自己的信号/超时编排。已经进入 `asyncio.to_thread()` 的同步
+`run_once()` 不能靠取消 await 强制终止，必须允许其事务安全完成。
 
 ## 7. Trigger 实现
 
@@ -284,6 +287,9 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 
 `outbox.event_id` 唯一，保证一个持久事件只有一条 Outbox 行；`events.dedupe_key` 不唯一，允许同类领域转换以后重新发生。
 
+`watches.run_status`、开始/结束时间和 `last_error` 是最后写入的诊断快照。允许 Observer 重叠时，
+它们不构成准确的活跃运行计数，也不得被下游当作调度锁或 Authority 来源。
+
 ### 8.3 第一事务：保存证据
 
 `_persist_observation()` 使用 `BEGIN IMMEDIATE`：
@@ -339,7 +345,8 @@ stateDiagram-v2
 
 `OutboxDispatcher.dispatch_ready()`：
 
-1. 当前 Dispatcher 实例首次运行时调用 `recover_in_flight()`，恢复上个进程遗留的 `DELIVERING`；
+1. 当前 Dispatcher 实例首次运行时调用 `recover_in_flight()`，在取得数据库唯一投递所有权后恢复
+   上个进程遗留的 `DELIVERING`；
 2. 按 `batch_size` 调用 `claim_due()`；
 3. 对每个 ClaimedEvent 同步调用 `EventSink.deliver()`；
 4. 成功：`record_delivery_success()`，写入成功尝试并设为 `DELIVERED`；
@@ -355,6 +362,10 @@ stateDiagram-v2
 如果 Sink 已接受事件、但进程在 SQLite 记录成功前退出，恢复后会再次投递同一 `event_id`。因此实际语义是 at-least-once。
 
 落地要求：生产 EventSink 必须在外部服务或自身持久存储中按 `event_id` 幂等。进程内集合只能用于示例和测试。
+
+v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
+`DELIVERING`。因此同一 SQLite 数据库只能有一个活跃 Dispatcher；进程监督器必须保证旧实例退出后
+再启动替代实例。
 
 ## 10. JSON 与时间实现
 
@@ -393,7 +404,10 @@ dispatcher = OutboxDispatcher(store, sink, config=delivery_config)
 1. Watch 循环：等待 Trigger 并执行 `runner.run_next(definition)`；
 2. Delivery 循环：按下游选择的短间隔执行 `dispatcher.dispatch_ready()`。
 
-停止流程由下游设置 stop event 并等待当前数据库事务完成。不得在多个主机上把同一个 SQLite 文件当作分布式协调数据库。
+每个 SQLite 数据库只允许一个活跃 Delivery 循环。停止流程由下游负责：设置 stop event 只能阻止
+后续轮次，不能唤醒正在等待的长 Interval/Cron；需要及时停机时应取消等待 Trigger 的外层 Task，
+但必须让已经进入 `run_once()` 的同步工作和当前数据库事务安全完成。不得在多个主机上把同一个
+SQLite 文件当作分布式协调数据库。
 
 ## 12. 配置方案
 
@@ -459,6 +473,10 @@ v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动�
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
+PR #2 进一步增加直接回归：Public API 导出集合、SQLite Schema 版本 fail-fast、三层强制文档与
+采用指南存在性、README 可发现性、相对链接解析，以及所有 Python 文档代码块的语法编译。这样
+“文档完整”和“示例至少可编译”进入 CI，而不是只依赖人工目测。
+
 ## 15. CI 落地
 
 `.github/workflows/ci.yml` 在 Pull Request 和 `main` push 上运行。
@@ -483,6 +501,19 @@ python -m mypy src
 
 mypy 对 `watch_engine` 使用 strict 模式。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM 规则集。
 
+### 15.3 包构建与隔离安装
+
+CI 还必须：
+
+1. 执行 `python -m build` 生成 sdist 和 wheel；
+2. 创建全新虚拟环境；
+3. 从 `dist/*.whl` 安装，包括声明的运行时依赖；
+4. 离开仓库工作目录后导入 `watch_engine`；
+5. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
+
+这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试，也不声称
+v0.1.0 wheel 包含仓库级 Event Schema。
+
 ## 16. 本地验证命令
 
 ```bash
@@ -501,27 +532,37 @@ python -m build
 
 发布前建议在全新虚拟环境安装生成的 wheel，运行最小采用示例，确认未隐式依赖仓库源码路径。
 
+2026-08-11 对 PR #2 的独立复核结果：
+
+- `python -m compileall src tests`：通过；
+- wheel 无隔离构建：通过；
+- wheel 安装到全新 Python 3.12 虚拟环境，在显式提供声明的 `croniter` 依赖后从
+  `site-packages` 导入：通过；
+- wheel 内容核对：不包含仓库级 `schemas/watch-event-v1.json`。
+
+最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。跨工程消费者必须从固定 Tag URL 获取并
+固定保存 Schema；若未来决定把 Schema 作为 package resource 分发，必须增加 wheel 内容测试并以
+新版本发布，不能悄悄改变已经存在的 v0.1.0 产物。
+
 ## 17. 版本与发布方案
 
 ### 17.1 当前版本来源
 
 `pyproject.toml` 中的 `project.version = "0.1.0"` 是 Python 包版本来源。
 
-### 17.2 v0.1.0 发布条件
+### 17.2 已发布基线
 
-1. 三层强制文档完成：
-   - 模块需求；
-   - 技术架构；
-   - 实际落地技术方案。
-2. 独立模块额外具备下游采用指南。
-3. CI 全部通过。
-4. wheel 构建与全新环境安装通过。
-5. `watch-event-v1` 验证通过。
-6. 至少一个真实下游完成端到端采用验证。
-7. 创建 Git Tag `v0.1.0` 和 GitHub Release。
-8. Release Notes 说明能力边界、兼容契约与已知限制。
+`v0.1.0` 已于 2026-08-10 12:58:57 UTC 正式发布，不是待发布状态：
 
-在满足上述发布条件前，`pyproject.toml` 中的版本表示代码目标版本，不等于正式 Release 已经完成。
+- Git Tag：`v0.1.0`；
+- GitHub Release：`watch-engine v0.1.0`；
+- Release：<https://github.com/kongbu0621/watch-engine/releases/tag/v0.1.0>；
+- Tag 指向提交 `9752398`；
+- Release 非 Draft、非 Prerelease。
+
+本 PR 的四份正式中文文档发生在该 Tag 之后，所以不会反向进入已经冻结的 v0.1.0 产物。不得移动或
+覆盖 `v0.1.0` Tag。后续若真实采用暴露代码、打包或契约修复，应更新包版本并创建新的 Release；
+只有文档变化时，也必须明确它描述的是已发布代码还是未来目标。
 
 ## 18. 需求—架构—实现追踪
 
@@ -538,8 +579,9 @@ python -m build
 | FR-09 可靠投递 | Outbox / Dispatcher | `outbox`、`delivery_attempts`、`delivery.py` | 已实现 |
 | FR-10 跨工程契约 | Event Schema | `schemas/watch-event-v1.json` | 已实现 |
 | 独立采用验证 | 下游工程 | `apple-refurb-monitor` | 待完成 |
-| wheel 隔离安装验证 | Release 流程 | 构建产物与全新 venv | 待完成 |
-| Git Tag / Release | Release 流程 | GitHub `v0.1.0` | 待完成 |
+| wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
+| Schema wheel 分发 | 打包边界 | v0.1.0 wheel 不包含仓库级 Schema | 已知限制，使用固定 Tag URL |
+| Git Tag / Release | Release 流程 | GitHub `v0.1.0` | 已完成（2026-08-10） |
 
 “已实现”表示代码落点存在；最终完成仍以自动化测试、CI 和真实下游验证为准。
 
@@ -549,7 +591,7 @@ python -m build
 
 - 确认三层文档和采用指南互相链接；
 - 检查文档示例与 Public API；
-- 确认 PR 仅修改文档。
+- 确认 PR 仅修改正式文档和仓库维护指引，不修改 Runtime、Schema 或 Public API。
 
 ### P1：首个真实采用验证
 
@@ -562,7 +604,7 @@ python -m build
 - 验证失败证据、Authority、Event、Outbox、重试与重启；
 - 将通用缺口与 Apple 领域需求分开记录。
 
-### P2：正式 v0.1.0 Release
+### P2：真实采用后的维护版本
 
 真实采用验证完成后：
 
@@ -570,8 +612,9 @@ python -m build
 - 重跑 CI；
 - 构建 wheel；
 - 在全新虚拟环境安装验证；
-- 固定 Tag；
-- 发布 Release Notes。
+- 按 Semantic Versioning 更新版本号；
+- 创建新 Tag 和 Release Notes；
+- 永不移动已经发布的 `v0.1.0` Tag。
 
 ### 暂不推进
 

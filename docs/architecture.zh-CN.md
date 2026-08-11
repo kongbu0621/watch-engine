@@ -30,12 +30,13 @@
 - 管理业务配置、秘密和进程部署。
 
 ```mermaid
-flowchart LR
+flowchart TD
     T["Trigger"] --> R["Watch Runtime"]
-    O["Domain Observer"] --> R
+    R -->|"observe()"| O["Domain Observer"]
+    O -->|"Observation"| R
     R --> S["SQLite Store"]
-    R --> P["Transition Policy"]
-    P --> S
+    S -->|"evaluate()"| P["Transition Policy"]
+    P -->|"EventDraft[]"| S
     S --> D["Outbox Dispatcher"]
     D --> E["Domain EventSink"]
 ```
@@ -108,7 +109,14 @@ Runtime 不解释领域状态，不直接投递通知。
 - 计算有界指数退避；
 - 重试耗尽后标记 `DEAD`。
 
+v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的 `OutboxDispatcher` 所有者。
+`recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
+中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
+at-least-once 允许崩溃后的重复投递，但不把多 Dispatcher 并发协调作为 v0.1 支持能力。
+
 ## 5. 核心执行流程
+
+### 5.1 观测与 Authority 提升
 
 ```mermaid
 sequenceDiagram
@@ -117,8 +125,6 @@ sequenceDiagram
     participant Observer
     participant Store
     participant Policy
-    participant Dispatcher
-    participant Sink
 
     Trigger->>Runtime: 允许一次运行
     Runtime->>Observer: observe()
@@ -133,6 +139,16 @@ sequenceDiagram
     else DEGRADED / FAILED / 过时
         Runtime->>Store: 保留证据，不提升
     end
+```
+
+### 5.2 Outbox 投递
+
+```mermaid
+sequenceDiagram
+    participant Dispatcher
+    participant Store
+    participant Sink
+
     Dispatcher->>Store: 读取到期 Outbox
     Dispatcher->>Sink: deliver(WatchEvent)
     Sink-->>Dispatcher: 成功或异常
@@ -206,6 +222,10 @@ v0.1 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠�
 - 同时间戳采用保守的先到者胜出；
 - Observer 若可能被并发调用，线程安全由其实现者负责。
 
+`watches.run_status` 是最后一次写入的诊断快照，不是活跃运行计数器。同一个 `watch_id` 的
+Observer 重叠时，一个较早完成的运行可能把状态写回 `IDLE`，而另一个运行仍在执行。因此下游
+不得使用该字段进行调度互斥、健康判定或 Authority 决策。
+
 SQLite 不是分布式锁，因此多个主机共享数据库不属于 v0.1 支持范围。
 
 ## 9. 事件身份和投递语义
@@ -254,7 +274,8 @@ SQLite 不是分布式锁，因此多个主机共享数据库不属于 v0.1 支�
 
 ### 10.5 进程重启
 
-SQLite 中已提交的 Authority、Event、Outbox 和尝试记录保持有效；新的 Dispatcher 可继续到期投递。
+SQLite 中已提交的 Authority、Event、Outbox 和尝试记录保持有效。在确认旧 Dispatcher 已退出并
+取得数据库的唯一投递所有权后，新 Dispatcher 会恢复遗留的 `DELIVERING` 并继续到期投递。
 
 ## 11. 对外契约
 
@@ -264,7 +285,10 @@ SQLite 中已提交的 Authority、Event、Outbox 和尝试记录保持有效；
 
 ### 11.2 Watch Event v1
 
-跨进程或跨工程传输使用 `schemas/watch-event-v1.json`。消费者应按 Schema 验证。
+跨进程或跨工程传输使用 `schemas/watch-event-v1.json`。v0.1.0 的 wheel 不包含这个仓库级
+Schema；消费者应从固定 Release Tag 获取并随自身版本固定保存，而不是读取会继续变化的 `main`：
+
+`https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-event-v1.json`
 
 兼容性规则：
 
@@ -297,10 +321,15 @@ v0.1 提供运行组件，不提供通用 daemon CLI 或进程监督器。
 
 - 组合 WatchDefinition；
 - 管理 Runtime 与 Dispatcher 循环；
+- 保证每个 SQLite 数据库只有一个活跃 Dispatcher；
 - 选择 SQLite 文件位置；
 - 加载配置和秘密；
 - 使用 systemd、容器或其他监督方式运行进程；
 - 记录业务日志和可观测指标。
+
+`WatchRunner.serve()` 的 stop event 只在两次运行之间检查。若当前仍在等待长 Interval/Cron，设置
+stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asyncio Task 或自行实现信号/超时编排，
+并等待正在执行的同步 `run_once()` 和数据库事务安全结束。
 
 未来只有在多个下游出现相同、稳定的 daemon 需求后，才考虑将其抽入核心。
 
@@ -324,6 +353,7 @@ v0.1 提供运行组件，不提供通用 daemon CLI 或进程监督器。
 ## 15. v0.1 限制
 
 - 单节点 SQLite；
+- 每个数据库只支持一个活跃 Outbox Dispatcher；
 - Observer 和 EventSink 是同步边界；
 - 不提供分布式协调；
 - 不提供动态插件加载；
