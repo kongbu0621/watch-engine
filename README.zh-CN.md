@@ -135,6 +135,7 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 
 - [模块需求说明](docs/module-requirements.zh-CN.md)：定义独立可复用模块的目标、边界、需求和验收标准。
 - [架构设计](docs/architecture.zh-CN.md)：说明运行时分层、事务、并发、失败恢复和对外契约。
+- [实际落地技术方案](docs/implementation.zh-CN.md)：把当前版本映射到代码、SQLite、配置、测试、CI 和发布流程。
 - [下游采用指南](docs/adoption-guide.zh-CN.md)：指导其他模块、其他工程和其他开发者完成真实接入。
 
 ## 开发
