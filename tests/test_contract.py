@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,7 +9,37 @@ import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
-from watch_engine import WatchEvent
+import watch_engine
+from watch_engine import SQLiteStore, WatchEvent
+
+EXPECTED_PUBLIC_API = {
+    "CronTrigger",
+    "DeliveryConfig",
+    "DeliveryResult",
+    "EventDraft",
+    "EventSink",
+    "IntervalTrigger",
+    "ManualTrigger",
+    "Observation",
+    "ObservationStatus",
+    "Observer",
+    "OutboxDispatcher",
+    "RetryPolicy",
+    "RunResult",
+    "SQLiteStore",
+    "TransitionPolicy",
+    "Trigger",
+    "WatchDefinition",
+    "WatchEvent",
+    "WatchRunner",
+    "WatchRuntime",
+}
+
+
+def test_public_api_exports_are_explicit_and_importable() -> None:
+    assert set(watch_engine.__all__) == EXPECTED_PUBLIC_API
+    for name in EXPECTED_PUBLIC_API:
+        assert getattr(watch_engine, name) is not None
 
 
 def test_watch_event_v1_validates_against_published_contract() -> None:
@@ -73,3 +104,13 @@ def test_naive_event_datetime_is_rejected() -> None:
             subject={},
             payload={},
         )
+
+
+def test_unsupported_sqlite_schema_version_fails_fast(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE schema_meta SET version = 2")
+
+    with pytest.raises(RuntimeError, match="unsupported database schema 2; expected 1"):
+        SQLiteStore(database)
