@@ -12,7 +12,6 @@ from jsonschema.exceptions import ValidationError
 import watch_engine
 from watch_engine import SQLiteStore, WatchEvent
 
-
 EXPECTED_PUBLIC_API = {
     "CronTrigger",
     "DeliveryConfig",
