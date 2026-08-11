@@ -85,14 +85,16 @@ class InventoryObserver:
         except TemporaryAccessError as exc:
             return Observation.failed(
                 observed_at=datetime.now(timezone.utc),
-                evidence={"error": type(exc).__name__},
+                error=str(exc),
+                evidence={"error_type": type(exc).__name__},
             )
 
         if evidence.is_incomplete:
             return Observation.degraded(
-                {"sku": evidence.sku},
+                state={"sku": evidence.sku},
                 observed_at=datetime.now(timezone.utc),
                 evidence={"reason": "required-field-missing"},
+                error="required field missing",
             )
 
         return Observation.valid(
