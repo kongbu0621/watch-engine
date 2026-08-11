@@ -131,6 +131,12 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json)；使用方应依据该契约，而不是导入
 内部数据库模型。
 
+## 设计与采用文档
+
+- [模块需求说明](docs/module-requirements.zh-CN.md)：定义独立可复用模块的目标、边界、需求和验收标准。
+- [架构设计](docs/architecture.zh-CN.md)：说明运行时分层、事务、并发、失败恢复和对外契约。
+- [下游采用指南](docs/adoption-guide.zh-CN.md)：指导其他模块、其他工程和其他开发者完成真实接入。
+
 ## 开发
 
 ```bash
