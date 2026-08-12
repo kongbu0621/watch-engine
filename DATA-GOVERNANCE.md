@@ -23,7 +23,10 @@ provided Observer or EventSink implementations and remains the adopter's respons
 
 - JSON fields are limited to 1 MiB encoded size; identifiers, scalar event metadata, and error
   fields are limited to 2,048 characters.
-- POSIX SQLite database, WAL, and SHM files are owner-only (`0600`); use a `0700` parent directory.
+- POSIX SQLite database, WAL, and SHM files are owner-only (`0600`) single-link regular files; use
+  a `0700` parent directory and do not create hard-link aliases.
+- Treat the SQLite file as engine-owned. Never co-locate adopter tables, views, triggers, indexes,
+  business records, or personal information in that database.
 - `purge_before(cutoff, watch_id=...)` removes old terminal event history and non-authoritative
   observations while preserving undelivered events and current Authority.
 - `delete_watch(watch_id)` refuses outstanding delivery by default. The

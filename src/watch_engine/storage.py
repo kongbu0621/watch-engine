@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable, Sequence
@@ -52,6 +53,62 @@ class SQLiteStore:
             "delivery_attempts",
         }
     )
+    _EXPECTED_SCHEMA_OBJECTS = frozenset(
+        {("table", name) for name in REQUIRED_TABLES}
+        | {
+            ("index", "idx_observations_watch_time"),
+            ("index", "idx_events_watch_dedupe"),
+            ("index", "idx_outbox_due"),
+        }
+    )
+    _EXPECTED_FOREIGN_KEYS = {
+        "schema_meta": frozenset(),
+        "watches": frozenset(),
+        "observations": frozenset(
+            {("watches", "watch_id", "watch_id", "NO ACTION", "NO ACTION", "NONE")}
+        ),
+        "authoritative_states": frozenset(
+            {
+                (
+                    "observations",
+                    "observation_id",
+                    "observation_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+                ("watches", "watch_id", "watch_id", "NO ACTION", "NO ACTION", "NONE"),
+            }
+        ),
+        "events": frozenset(
+            {("watches", "watch_id", "watch_id", "NO ACTION", "NO ACTION", "NONE")}
+        ),
+        "outbox": frozenset(
+            {("events", "event_id", "event_id", "NO ACTION", "NO ACTION", "NONE")}
+        ),
+        "delivery_attempts": frozenset(
+            {
+                ("events", "event_id", "event_id", "NO ACTION", "NO ACTION", "NONE"),
+                ("outbox", "outbox_id", "outbox_id", "NO ACTION", "NO ACTION", "NONE"),
+            }
+        ),
+    }
+    _EXPECTED_CHECK_FRAGMENTS = {
+        "observations": "CHECK(STATUSIN('VALID','DEGRADED','FAILED'))",
+        "outbox": "CHECK(STATUSIN('PENDING','DELIVERING','RETRY','DELIVERED','DEAD'))",
+        "delivery_attempts": "CHECK(STATUSIN('SUCCEEDED','FAILED'))",
+    }
+    _EXPECTED_INDEXES = {
+        "idx_observations_watch_time": (
+            "observations",
+            ("watch_id", "observed_at"),
+        ),
+        "idx_events_watch_dedupe": ("events", ("watch_id", "dedupe_key")),
+        "idx_outbox_due": (
+            "outbox",
+            ("status", "next_attempt_at", "outbox_id"),
+        ),
+    }
     _EXPECTED_TABLE_COLUMNS = {
         "schema_meta": (("version", "INTEGER", 1, None, 0),),
         "watches": (
@@ -158,8 +215,15 @@ class SQLiteStore:
         try:
             descriptor = os.open(database, flags, 0o600)
         except FileExistsError:
-            if database.is_symlink() or not database.is_file():
-                raise ValueError("SQLite database path must be a regular file") from None
+            file_status = database.stat(follow_symlinks=False)
+            if (
+                database.is_symlink()
+                or not stat.S_ISREG(file_status.st_mode)
+                or (os.name == "posix" and file_status.st_nlink != 1)
+            ):
+                raise ValueError(
+                    "SQLite database path must be a single-link regular file"
+                ) from None
             return False
         else:
             os.close(descriptor)
@@ -179,10 +243,14 @@ class SQLiteStore:
                 )
             if "schema_meta" in existing_tables:
                 self._validate_table_layout(connection, "schema_meta")
-                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+                rows = connection.execute(
+                    "SELECT version FROM schema_meta LIMIT 2"
+                ).fetchall()
                 self._validate_schema_meta(rows)
                 self._validate_required_tables(existing_tables)
                 self._validate_table_layouts(connection)
+                self._validate_schema_objects(existing_objects)
+                self._validate_expected_indexes(connection)
 
     @staticmethod
     def _read_schema_objects(
@@ -209,8 +277,14 @@ class SQLiteStore:
                     flags |= os.O_NOFOLLOW
                 descriptor = os.open(candidate, flags)
                 try:
-                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                        raise ValueError("SQLite database files must be regular files")
+                    file_status = os.fstat(descriptor)
+                    if (
+                        not stat.S_ISREG(file_status.st_mode)
+                        or file_status.st_nlink != 1
+                    ):
+                        raise ValueError(
+                            "SQLite database files must be single-link regular files"
+                        )
                     os.fchmod(descriptor, 0o600)
                 finally:
                     os.close(descriptor)
@@ -245,13 +319,21 @@ class SQLiteStore:
                 )
             if "schema_meta" in existing_tables:
                 self._validate_table_layout(connection, "schema_meta")
-                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+                rows = connection.execute(
+                    "SELECT version FROM schema_meta LIMIT 2"
+                ).fetchall()
                 self._validate_schema_meta(rows)
                 self._validate_required_tables(existing_tables)
                 self._validate_table_layouts(connection)
+                self._validate_schema_objects(existing_objects)
+                self._validate_expected_indexes(connection)
+                return
 
-            connection.executescript(
-                """
+            try:
+                connection.executescript(
+                    """
+                BEGIN IMMEDIATE;
+
                 CREATE TABLE IF NOT EXISTS schema_meta (
                     version INTEGER NOT NULL
                 );
@@ -337,18 +419,13 @@ class SQLiteStore:
                     FOREIGN KEY(outbox_id) REFERENCES outbox(outbox_id),
                     FOREIGN KEY(event_id) REFERENCES events(event_id)
                 );
-                """
-            )
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
-                if not rows:
-                    connection.execute(
-                        "INSERT INTO schema_meta(version) VALUES (?)",
-                        (self.SCHEMA_VERSION,),
-                    )
-                else:
-                    self._validate_schema_meta(rows)
+
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO schema_meta(version) VALUES (?)",
+                    (self.SCHEMA_VERSION,),
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -374,6 +451,32 @@ class SQLiteStore:
         missing = self.REQUIRED_TABLES - existing_tables
         if missing:
             raise RuntimeError("watch-engine database schema is incomplete")
+        if existing_tables != self.REQUIRED_TABLES:
+            raise RuntimeError("watch-engine database contains unexpected tables")
+
+    def _validate_schema_objects(
+        self, existing_objects: set[tuple[str, str]]
+    ) -> None:
+        if existing_objects != self._EXPECTED_SCHEMA_OBJECTS:
+            raise RuntimeError("watch-engine database schema objects are incompatible")
+
+    def _validate_expected_indexes(self, connection: sqlite3.Connection) -> None:
+        for index_name, (table_name, expected_columns) in self._EXPECTED_INDEXES.items():
+            index_rows = connection.execute(
+                f"PRAGMA index_list({table_name})"  # noqa: S608 - fixed internal names
+            ).fetchall()
+            matching = [row for row in index_rows if str(row["name"]) == index_name]
+            if len(matching) != 1:
+                raise RuntimeError("watch-engine database index definitions are incompatible")
+            index = matching[0]
+            columns = self._read_index_columns(connection, index_name)
+            if (
+                int(index["unique"]) != 0
+                or str(index["origin"]) != "c"
+                or int(index["partial"]) != 0
+                or columns != expected_columns
+            ):
+                raise RuntimeError("watch-engine database index definitions are incompatible")
 
     def _validate_table_layouts(self, connection: sqlite3.Connection) -> None:
         for table_name in self._EXPECTED_TABLE_COLUMNS:
@@ -385,6 +488,9 @@ class SQLiteStore:
         expected = self._EXPECTED_TABLE_COLUMNS[table_name]
         rows = connection.execute(
             f"PRAGMA table_info({table_name})"  # noqa: S608 - fixed internal names
+        ).fetchall()
+        extended_rows = connection.execute(
+            f"PRAGMA table_xinfo({table_name})"  # noqa: S608 - fixed internal names
         ).fetchall()
         actual = tuple(
             (
@@ -402,6 +508,91 @@ class SQLiteStore:
             raise RuntimeError(
                 f"watch-engine database table layout is incompatible: {table_name}"
             )
+        if len(extended_rows) != len(rows) or any(
+            int(row["hidden"]) != 0 for row in extended_rows
+        ):
+            raise RuntimeError(
+                f"watch-engine database table layout is incompatible: {table_name}"
+            )
+        self._validate_foreign_keys(connection, table_name)
+        self._validate_check_constraint(connection, table_name)
+        if table_name == "outbox":
+            self._validate_unique_index(connection, table_name, ("event_id",))
+
+    def _validate_foreign_keys(
+        self, connection: sqlite3.Connection, table_name: str
+    ) -> None:
+        actual = frozenset(
+            (
+                str(row["table"]),
+                str(row["from"]),
+                str(row["to"]),
+                str(row["on_update"]),
+                str(row["on_delete"]),
+                str(row["match"]),
+            )
+            for row in connection.execute(
+                f"PRAGMA foreign_key_list({table_name})"  # noqa: S608
+            ).fetchall()
+        )
+        if actual != self._EXPECTED_FOREIGN_KEYS[table_name]:
+            raise RuntimeError(
+                f"watch-engine database foreign keys are incompatible: {table_name}"
+            )
+
+    def _validate_check_constraint(
+        self, connection: sqlite3.Connection, table_name: str
+    ) -> None:
+        expected = self._EXPECTED_CHECK_FRAGMENTS.get(table_name)
+        if expected is None:
+            return
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if row is None or not isinstance(row["sql"], str):
+            raise RuntimeError(
+                f"watch-engine database constraints are incompatible: {table_name}"
+            )
+        sql_without_comments = re.sub(
+            r"/\*.*?\*/|--[^\r\n]*", "", row["sql"], flags=re.DOTALL
+        )
+        normalized = "".join(sql_without_comments.upper().split())
+        if expected not in normalized:
+            raise RuntimeError(
+                f"watch-engine database constraints are incompatible: {table_name}"
+            )
+
+    @staticmethod
+    def _read_index_columns(
+        connection: sqlite3.Connection, index_name: str
+    ) -> tuple[str, ...]:
+        escaped_name = index_name.replace('"', '""')
+        return tuple(
+            str(column["name"])
+            for column in connection.execute(
+                f'PRAGMA index_info("{escaped_name}")'  # noqa: S608
+            ).fetchall()
+        )
+
+    @classmethod
+    def _validate_unique_index(
+        cls,
+        connection: sqlite3.Connection,
+        table_name: str,
+        expected_columns: tuple[str, ...],
+    ) -> None:
+        for row in connection.execute(
+            f"PRAGMA index_list({table_name})"  # noqa: S608 - fixed internal names
+        ).fetchall():
+            if int(row["unique"]) != 1 or int(row["partial"]) != 0:
+                continue
+            columns = cls._read_index_columns(connection, str(row["name"]))
+            if columns == expected_columns:
+                return
+        raise RuntimeError(
+            f"watch-engine database unique constraints are incompatible: {table_name}"
+        )
 
     def _ensure_watch(
         self, connection: sqlite3.Connection, watch_id: str, now: datetime

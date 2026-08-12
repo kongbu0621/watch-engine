@@ -394,6 +394,9 @@ Watch；只有明确接受事件丢失时才使用 `allow_undelivered=True`。�
 5. 检查 Public API 与 Watch Event Schema；
 6. 备份持久数据库后再执行涉及 Schema migration 的升级。
 
+watch-engine SQLite 文件必须保持引擎独占。不要在其中添加业务表、View、Trigger 或自定义 Index；
+这些对象会使下次启动的只读身份校验失败，业务数据和个人信息应放在采用方自己的独立存储中。
+
 Semantic Versioning 解释：
 
 - Patch：兼容性修复；

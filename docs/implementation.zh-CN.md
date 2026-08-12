@@ -279,10 +279,15 @@ Python 连接参数：
 连接会验证 WAL 与 `secure_delete` 的实际返回值，不支持时 fail-fast，而不是假定 PRAGMA 已生效。
 v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
 初始化直接失败，不进行静默迁移或任意选择第一行。建表前先检查已有数据库：存在用户表但没有
-`schema_meta` 时拒绝接管；即使碰巧存在版本值为 `1` 的同名表，也必须具备完整 v1 表集合以及与
-已发布 v1 一致的列名、类型、非空、默认值与主键签名，才认定为本模块数据库。识别使用只读连接，
-版本、表集合或列签名不兼容时，在执行写型 PRAGMA、chmod 或任何 watch-engine DDL 前失败，避免
-误指路径后污染其他 SQLite 数据库。空 SQLite 文件没有业务对象，可作为显式初始化目标。
+`schema_meta` 时拒绝接管；即使碰巧存在版本值为 `1` 的同名表，也必须完整匹配 v1 用户定义对象
+集合、列名、类型、非空、默认值、主键、Foreign Key、状态 CHECK 以及 Outbox `event_id` 唯一约束，
+才认定为本模块数据库。识别使用只读连接，任一不兼容时，在执行写型 PRAGMA、chmod 或任何
+watch-engine DDL 前失败。该 SQLite 文件必须由引擎独占，不允许混放采用方对象或业务数据；空
+SQLite 文件没有业务对象，可作为显式初始化目标。
+
+空库初始化使用一个显式 `BEGIN IMMEDIATE ... COMMIT` 事务创建完整 v1 Schema 和版本行；任一
+建表/建索引动作失败时由连接事务回滚，不能留下会阻断下次启动的半初始化对象。已有且验证通过的
+v1 数据库直接复用，不重复运行 `CREATE IF NOT EXISTS`。
 
 ### 8.2 表结构
 
@@ -541,12 +546,14 @@ v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动�
 13. 严格 JSON 形状、大小、深度与防御性复制；
 14. Outbox 确认必须与 claim 身份和尝试次数一致；
 15. 超大批量清理不依赖 SQLite 可变长度参数列表；
-16. 已有 SQLite 的身份、版本、表集合与列签名先只读验证，拒绝时表、journal mode 和权限保持不变；
+16. 已有 SQLite 的身份、版本、完整对象集合、列、Foreign Key 与关键 CHECK/UNIQUE 约束先只读验证，
+    拒绝时 Schema、journal mode 和权限保持不变；
 17. 确认失败或进程级中断后，同一 Dispatcher 下次调用恢复遗留 claim；
 18. Sink 非 `None` 返回值按失败处理，投递完成时间与重试起点准确；
 19. Observer 返回值、sleep/clock 二次失败不会让运行状态静默卡住或覆盖根因；
 20. WAL checkpoint 繁忙时压缩明确失败，不把未完成 checkpoint 报成成功。
 21. `get_watch_status()` 对不存在、成功、失败三种 Watch 返回稳定 typed 诊断，且不暴露内部表查询。
+22. 首次 Schema 创建中途失败时所有用户对象回滚，随后可重新初始化完整 v1 Schema。
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
@@ -708,11 +715,12 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 
 | 风险 | 代码落点 | 验收 |
 |---|---|---|
-| SQLite 默认权限受 umask 影响 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600` 与 symlink 拒绝测试 |
+| SQLite 权限或路径别名 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600`、symlink 与 hard-link 拒绝测试 |
 | 异常或业务标识含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 与调用方标识不进入库日志，异常消息不进入数据库 |
 | 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
 | 超大持久化字段 | `_json.MAX_JSON_BYTES`、`MAX_METADATA_CHARACTERS`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
-| 误指或同名伪装 SQLite 数据库 | 只读身份/版本/表列签名预检 | 拒绝前后表、journal mode、权限不变 |
+| 误指、约束缺失或混放对象的 SQLite | 只读身份/版本/完整 Schema 预检 | 拒绝前后对象、journal mode、权限不变 |
+| 首次建库中途失败 | 单事务 Schema + 版本初始化 | Authorizer 阻断 DDL 后零对象残留且可重试 |
 | 投递中断后 claim 卡死 | Dispatcher `finally` 恢复标记 | 同对象确认失败/进程级中断恢复测试 |
 | 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |
 | 错配或过期 Outbox 确认 | claim 的 event/attempt 条件更新 | 伪造 claim 不改变状态、不写审计行 |

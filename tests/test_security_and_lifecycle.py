@@ -132,6 +132,21 @@ def test_symbolic_link_database_is_rejected(tmp_path: Path) -> None:
         SQLiteStore(link)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link semantics")
+def test_hard_link_database_alias_is_rejected(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    SQLiteStore(database)
+    alias = tmp_path / "alias.db"
+    os.link(database, alias)
+    original_mode = stat.S_IMODE(database.stat().st_mode)
+
+    with pytest.raises(ValueError, match="single-link regular file"):
+        SQLiteStore(alias)
+
+    assert database.stat().st_ino == alias.stat().st_ino
+    assert stat.S_IMODE(database.stat().st_mode) == original_mode
+
+
 def test_memory_database_fails_fast_instead_of_losing_schema_between_connections() -> None:
     with pytest.raises(ValueError, match="file-backed"):
         SQLiteStore(":memory:")
@@ -257,6 +272,248 @@ def test_lookalike_table_names_with_wrong_layout_are_rejected_without_mutation(
     assert not Path(f"{database}-shm").exists()
     if os.name == "posix":
         assert stat.S_IMODE(database.stat().st_mode) == 0o644
+
+
+def _create_exact_column_lookalike(
+    database: Path,
+    *,
+    foreign_keys: bool,
+    checks: bool,
+    unique_event: bool,
+    indexes: bool,
+) -> None:
+    observation_check = (
+        "CHECK(status IN ('VALID', 'DEGRADED', 'FAILED'))" if checks else ""
+    )
+    outbox_check = (
+        "CHECK(status IN ('PENDING', 'DELIVERING', 'RETRY', 'DELIVERED', 'DEAD'))"
+        if checks
+        else ""
+    )
+    attempt_check = "CHECK(status IN ('SUCCEEDED', 'FAILED'))" if checks else ""
+    event_unique = "UNIQUE" if unique_event else ""
+    observation_fk = (
+        ", FOREIGN KEY(watch_id) REFERENCES watches(watch_id)" if foreign_keys else ""
+    )
+    authority_fks = (
+        ", FOREIGN KEY(watch_id) REFERENCES watches(watch_id)"
+        ", FOREIGN KEY(observation_id) REFERENCES observations(observation_id)"
+        if foreign_keys
+        else ""
+    )
+    event_fk = (
+        ", FOREIGN KEY(watch_id) REFERENCES watches(watch_id)" if foreign_keys else ""
+    )
+    outbox_fk = (
+        ", FOREIGN KEY(event_id) REFERENCES events(event_id)" if foreign_keys else ""
+    )
+    attempt_fks = (
+        ", FOREIGN KEY(outbox_id) REFERENCES outbox(outbox_id)"
+        ", FOREIGN KEY(event_id) REFERENCES events(event_id)"
+        if foreign_keys
+        else ""
+    )
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            f"""
+            CREATE TABLE schema_meta (version INTEGER NOT NULL);
+            INSERT INTO schema_meta VALUES (1);
+            CREATE TABLE watches (
+                watch_id TEXT PRIMARY KEY,
+                execution_count INTEGER NOT NULL DEFAULT 0,
+                run_status TEXT NOT NULL DEFAULT 'IDLE',
+                last_started_at TEXT,
+                last_finished_at TEXT,
+                last_observation_status TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE observations (
+                observation_id TEXT PRIMARY KEY,
+                watch_id TEXT NOT NULL,
+                status TEXT NOT NULL {observation_check},
+                observed_at TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL
+                {observation_fk}
+            );
+            CREATE TABLE authoritative_states (
+                watch_id TEXT PRIMARY KEY,
+                observation_id TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+                {authority_fks}
+            );
+            CREATE TABLE events (
+                event_id TEXT PRIMARY KEY,
+                watch_id TEXT NOT NULL,
+                schema_version TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                subject_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+                {event_fk}
+            );
+            CREATE TABLE outbox (
+                outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL {event_unique},
+                status TEXT NOT NULL {outbox_check},
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TEXT,
+                locked_at TEXT,
+                delivered_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+                {outbox_fk}
+            );
+            CREATE TABLE delivery_attempts (
+                attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                outbox_id INTEGER NOT NULL,
+                event_id TEXT NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                attempted_at TEXT NOT NULL,
+                status TEXT NOT NULL {attempt_check},
+                error TEXT
+                {attempt_fks}
+            );
+            """
+        )
+        if indexes:
+            connection.executescript(
+                """
+                CREATE INDEX idx_observations_watch_time
+                    ON observations(watch_id, observed_at);
+                CREATE INDEX idx_events_watch_dedupe
+                    ON events(watch_id, dedupe_key);
+                CREATE INDEX idx_outbox_due
+                    ON outbox(status, next_attempt_at, outbox_id);
+                """
+            )
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (
+            {"foreign_keys": False, "checks": True, "unique_event": True},
+            "foreign keys are incompatible",
+        ),
+        (
+            {"foreign_keys": True, "checks": False, "unique_event": True},
+            "constraints are incompatible",
+        ),
+        (
+            {"foreign_keys": True, "checks": True, "unique_event": False},
+            "unique constraints are incompatible",
+        ),
+    ],
+)
+def test_exact_column_lookalike_missing_constraints_is_rejected_without_mutation(
+    tmp_path: Path, options: dict[str, bool], message: str
+) -> None:
+    database = tmp_path / "constraint-lookalike.db"
+    _create_exact_column_lookalike(database, indexes=True, **options)
+    if os.name == "posix":
+        database.chmod(0o644)
+
+    with pytest.raises(RuntimeError, match=message):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert journal_mode == "delete"
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o644
+
+
+def test_missing_or_additional_schema_objects_are_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    missing_index = tmp_path / "missing-index.db"
+    _create_exact_column_lookalike(
+        missing_index,
+        foreign_keys=True,
+        checks=True,
+        unique_event=True,
+        indexes=False,
+    )
+    with pytest.raises(RuntimeError, match="schema objects are incompatible"):
+        SQLiteStore(missing_index)
+
+    wrong_index = tmp_path / "wrong-index.db"
+    _create_exact_column_lookalike(
+        wrong_index,
+        foreign_keys=True,
+        checks=True,
+        unique_event=True,
+        indexes=True,
+    )
+    with sqlite3.connect(wrong_index) as connection:
+        connection.execute("DROP INDEX idx_outbox_due")
+        connection.execute("CREATE INDEX idx_outbox_due ON outbox(event_id)")
+    with pytest.raises(RuntimeError, match="index definitions are incompatible"):
+        SQLiteStore(wrong_index)
+
+    additional_table = tmp_path / "additional-table.db"
+    SQLiteStore(additional_table)
+    with sqlite3.connect(additional_table) as connection:
+        connection.execute("CREATE TABLE unrelated_private_state(secret TEXT)")
+    if os.name == "posix":
+        additional_table.chmod(0o644)
+    with pytest.raises(RuntimeError, match="contains unexpected tables"):
+        SQLiteStore(additional_table)
+    if os.name == "posix":
+        assert stat.S_IMODE(additional_table.stat().st_mode) == 0o644
+
+
+def test_first_schema_creation_is_atomic_and_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "interrupted-initialize.db"
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+
+    def deny_one_index(
+        action: int,
+        parameter_one: str | None,
+        _parameter_two: str | None,
+        _database_name: str | None,
+        _trigger_name: str | None,
+    ) -> int:
+        if (
+            action == sqlite3.SQLITE_CREATE_INDEX
+            and parameter_one == "idx_events_watch_dedupe"
+        ):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    connection.set_authorizer(deny_one_index)
+    monkeypatch.setattr(SQLiteStore, "_connect", lambda _self: connection)
+
+    with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+        SQLiteStore(database)
+
+    objects = connection.execute(
+        "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    assert objects == []
+    connection.close()
+
+    monkeypatch.undo()
+    SQLiteStore(database)
+    with sqlite3.connect(database) as reopened:
+        version = reopened.execute("SELECT version FROM schema_meta").fetchone()[0]
+    assert version == SQLiteStore.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize("path", [None, 1, object()])

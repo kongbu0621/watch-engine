@@ -106,7 +106,7 @@ uses ordinary cron expressions and requires an explicit timezone.
 keeps watch run metadata, every observation, the authoritative observation, events, outbox rows,
 and every delivery attempt.
 On POSIX systems the database, WAL, and SHM files are forced to owner-only mode (`0600`), and
-symbolic-link database paths are rejected. Deployments should also use an owner-only (`0700`)
+symbolic-link or multi-hard-link database paths are rejected. Deployments should also use an owner-only (`0700`)
 parent directory.
 
 Persistence deliberately has two transaction boundaries:
@@ -157,6 +157,11 @@ non-authoritative observations, `delete_watch()` refuses undelivered work unless
 overridden with the actual boolean `True`, and `compact_storage()` checkpoints and vacuums after
 other owners stop. Stop the
 runner and dispatcher before a destructive watch deletion or compaction.
+
+The SQLite file is an engine-owned storage boundary, not a shared application database. On reopen,
+the store validates the exact v1 user-defined schema objects, columns, foreign keys, status checks,
+and the Outbox event uniqueness constraint before changing the file. Do not add adopter tables,
+views, triggers, or indexes to that file; keep business and personal data in separate storage.
 
 `get_watch_status(watch_id)` returns a typed, read-only diagnostic snapshot without requiring
 callers to query internal SQLite tables. Model construction detaches caller-owned JSON and frozen

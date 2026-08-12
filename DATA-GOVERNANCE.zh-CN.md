@@ -20,7 +20,9 @@ typed 诊断快照可能包含调用方提供的标识或 error；采用方在�
 ## 存储、保留与删除
 
 - 单个 JSON 字段编码后上限为 1 MiB；标识符、事件元数据标量和错误字段上限为 2,048 字符；
-- POSIX 下数据库、WAL、SHM 文件权限为 `0600`，父目录应为 `0700`；
+- POSIX 下数据库、WAL、SHM 必须是权限为 `0600` 的单链接普通文件，父目录应为 `0700`，不得创建
+  硬链接别名；
+- SQLite 文件由引擎独占；不得混放采用方的表、View、Trigger、Index、业务记录或个人信息；
 - `purge_before(cutoff, watch_id=...)` 只删除旧的终态事件历史和非 Authority 观测，保留当前
   Authority 以及尚未完成的投递；
 - `delete_watch(watch_id)` 默认拒绝删除仍有未投递事件的 Watch；`allow_undelivered=True` 是明确的

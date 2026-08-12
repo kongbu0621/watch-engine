@@ -103,7 +103,7 @@ delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 `SQLiteStore` 要求使用文件数据库，并会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份
 Observation、authoritative Observation、事件、Outbox 行以及每一次投递尝试。
 在 POSIX 系统上，数据库、WAL 和 SHM 文件会被强制设为仅所有者可读写（`0600`），并拒绝
-符号链接数据库路径；部署时还应将父目录设为仅所有者可访问（`0700`）。
+符号链接或具有多个硬链接的数据库路径；部署时还应将父目录设为仅所有者可访问（`0700`）。
 
 持久化过程刻意划分为两个事务边界：
 
@@ -143,6 +143,10 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 未投递事件的 Watch，只有实际布尔值 `True` 才能覆盖该保护；`compact_storage()` 应在其他数据库
 使用者停止后执行 checkpoint 和 vacuum。
 执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
+
+SQLite 文件是引擎独占的存储边界，不是与业务共用的数据库。重新打开时会在改动文件前校验 v1
+全部用户定义 Schema 对象、列、Foreign Key、状态 CHECK 与 Outbox 事件唯一约束。不得向该文件
+增加采用方的表、View、Trigger 或 Index；业务数据和个人信息必须使用独立存储。
 
 `get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
 模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
