@@ -175,19 +175,19 @@ class RetryPolicy:
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"{field_name} must be a number")
-            if not isfinite(value):
+            try:
+                normalized = float(value)
+            except OverflowError:
+                raise ValueError(f"{field_name} must be finite") from None
+            if not isfinite(normalized):
                 raise ValueError(f"{field_name} must be finite")
+            object.__setattr__(self, field_name, normalized)
         if self.base_delay_seconds <= 0:
             raise ValueError("base_delay_seconds must be positive")
         if self.maximum_delay_seconds < self.base_delay_seconds:
             raise ValueError("maximum_delay_seconds must be >= base_delay_seconds")
         if self.multiplier < 1:
             raise ValueError("multiplier must be >= 1")
-        object.__setattr__(self, "base_delay_seconds", float(self.base_delay_seconds))
-        object.__setattr__(
-            self, "maximum_delay_seconds", float(self.maximum_delay_seconds)
-        )
-        object.__setattr__(self, "multiplier", float(self.multiplier))
 
     def delay_for_failure(self, failure_number: int) -> float:
         if isinstance(failure_number, bool) or not isinstance(failure_number, int):
@@ -243,6 +243,8 @@ class DeliveryResult:
             if not isinstance(self.error, str):
                 raise TypeError("error must be a string or None")
             object.__setattr__(self, "error", bounded_error_text(self.error))
+        if self.delivered and self.error is not None:
+            raise ValueError("a delivered result must not contain an error")
 
 
 @dataclass(frozen=True, slots=True)

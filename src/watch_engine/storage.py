@@ -41,6 +41,17 @@ class SQLiteStore:
         event_id_factory: Callable[[], str] = lambda: str(uuid4()),
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
+        if not isinstance(path, (str, Path)):
+            raise TypeError("path must be a string or Path")
+        if not str(path):
+            raise ValueError("path must not be empty")
+        for field_name, value in (
+            ("observation_id_factory", observation_id_factory),
+            ("event_id_factory", event_id_factory),
+            ("clock", clock),
+        ):
+            if not callable(value):
+                raise TypeError(f"{field_name} must be callable")
         self.path = str(path)
         self._observation_id_factory = observation_id_factory
         self._event_id_factory = event_id_factory
@@ -227,7 +238,7 @@ class SQLiteStore:
         )
 
     def mark_run_started(self, watch_id: str, *, now: datetime | None = None) -> None:
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._ensure_watch(connection, watch_id, timestamp)
@@ -246,7 +257,7 @@ class SQLiteStore:
         self, watch_id: str, error: str, *, now: datetime | None = None
     ) -> None:
         self._validate_watch_id(watch_id)
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         with self._connect() as connection:
             connection.execute(
                 """
@@ -271,7 +282,7 @@ class SQLiteStore:
         independent transaction.
         """
         self._validate_watch_id(watch_id)
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         observation_id = self._observation_id_factory()
         if not isinstance(observation_id, str) or not observation_id:
             raise ValueError("observation_id_factory must return a non-empty string")
@@ -526,7 +537,7 @@ class SQLiteStore:
         )
 
     def recover_in_flight(self, *, now: datetime | None = None) -> int:
-        timestamp = to_iso(now or self._clock())
+        timestamp = to_iso(now if now is not None else self._clock())
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -545,7 +556,7 @@ class SQLiteStore:
             raise TypeError("limit must be an integer")
         if limit < 1:
             raise ValueError("limit must be at least 1")
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
@@ -581,7 +592,7 @@ class SQLiteStore:
     def record_delivery_success(
         self, claimed: ClaimedEvent, *, now: datetime | None = None
     ) -> None:
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         attempt_number = claimed.attempts + 1
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -617,7 +628,7 @@ class SQLiteStore:
         retry_at: datetime | None,
         now: datetime | None = None,
     ) -> None:
-        timestamp = now or self._clock()
+        timestamp = now if now is not None else self._clock()
         attempt_number = claimed.attempts + 1
         status = "DEAD" if retry_at is None else "RETRY"
         with self._connect() as connection:
@@ -632,7 +643,7 @@ class SQLiteStore:
                 (
                     status,
                     attempt_number,
-                    to_iso(retry_at) if retry_at else None,
+                    to_iso(retry_at) if retry_at is not None else None,
                     bounded_error_text(error),
                     to_iso(timestamp),
                     claimed.outbox_id,
@@ -733,6 +744,8 @@ class SQLiteStore:
     def delete_watch(self, watch_id: str, *, allow_undelivered: bool = False) -> PurgeResult:
         """Delete one watch after owners stop, refusing queued delivery by default."""
         self._validate_watch_id(watch_id)
+        if not isinstance(allow_undelivered, bool):
+            raise TypeError("allow_undelivered must be a bool")
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")

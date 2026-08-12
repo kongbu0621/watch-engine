@@ -333,7 +333,8 @@ v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版�
 
 ### 8.5 数据生命周期 API
 
-`SQLiteStore` 只接受文件数据库路径；传入 `:memory:` 会立即抛出 `ValueError`。这是因为存储层的
+`SQLiteStore` 只接受非空 `str` 或 `Path` 文件数据库路径；错误类型、空字符串或 `:memory:` 会立即
+失败。构造函数也会在创建数据库文件前检查 ID 工厂与时钟是否可调用。这是因为存储层的
 每个公开操作都会建立独立连接，SQLite 的普通内存数据库无法在这些连接之间共享 Schema 和状态。
 
 `purge_before()`、`delete_watch()` 返回不含业务载荷和调用方标识符的 `PurgeResult`：
@@ -351,6 +352,7 @@ v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版�
 旧 Observation。`PENDING/RETRY/DELIVERING` 事件与当前 Authority 必须保留。`delete_watch()` 默认
 拒绝删除仍有未投递事件的 Watch；显式传入 `allow_undelivered=True` 才允许覆盖此保护。两个操作
 均在单个 `BEGIN IMMEDIATE` 事务中完成，任一 SQL 失败时整体回滚。
+`allow_undelivered` 必须是实际 `bool`；字符串 `"false"`、整数 `1` 等真值不得绕过破坏性保护。
 
 ## 9. Outbox 投递实现
 
@@ -388,8 +390,10 @@ stateDiagram-v2
    - 保存错误和失败尝试；
 6. 返回 `DeliveryResult` 集合。
 
-成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、上次 `attempts` 和 `DELIVERING` 状态；
-伪造、错配或已经过期的 claim 不得更新 Outbox，也不得生成投递审计行。
+成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、已完成尝试计数 `attempts` 和
+`DELIVERING` 状态；事件错配、尝试计数错配或已经不活跃的 claim 不得更新 Outbox，也不得生成
+投递审计行。`attempts` 不是唯一 claim token：在违反单所有者基线、让旧 Dispatcher 与恢复后的
+新 Dispatcher 重叠运行时，重新领取且尚未完成的新 claim 可能具有相同计数，v0.1 不承诺区分它们。
 
 ### 9.3 一致性语义
 
@@ -400,6 +404,8 @@ stateDiagram-v2
 v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
 `DELIVERING`。因此同一 SQLite 数据库只能有一个本机监控进程，Runner 与 Dispatcher 均由该进程
 持有；进程监督器必须保证旧实例退出后再启动替代实例。增加目标时使用同一进程内串行调度。
+所有可选时间与投递配置只把 `None` 解释为“未提供”；`0`、空容器等错误类型不会静默降级为当前
+时间或默认配置。
 
 ## 10. JSON 与时间实现
 

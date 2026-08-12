@@ -41,6 +41,8 @@ def safe_exception_text(exc: BaseException) -> str:
 def bounded_error_text(error: str) -> str:
     """Bound caller-supplied diagnostic text to prevent unbounded durable records."""
 
+    if not isinstance(error, str):
+        raise TypeError("error must be a string")
     if len(error) <= MAX_ERROR_CHARACTERS:
         return error
     suffix = "...<truncated>"

@@ -32,6 +32,29 @@ def test_interval_rejects_non_finite_configuration(value: float) -> None:
         IntervalTrigger(value, 10)
 
 
+def test_interval_rejects_integer_too_large_for_finite_float() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        IntervalTrigger(10**10_000, 10**10_000)
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"), [("random_uniform", None), ("sleep", 0)]
+)
+def test_interval_trigger_rejects_non_callable_dependencies(
+    keyword: str, value: object
+) -> None:
+    with pytest.raises(TypeError, match=f"{keyword} must be callable"):
+        IntervalTrigger(1, 2, **{keyword: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [True, "1", nan, inf])
+def test_interval_rejects_invalid_custom_random_result(value: object) -> None:
+    trigger = IntervalTrigger(1, 2, random_uniform=lambda _low, _high: value)  # type: ignore[arg-type,return-value]
+    expected = TypeError if isinstance(value, (bool, str)) else ValueError
+    with pytest.raises(expected):
+        trigger.next_delay()
+
+
 def test_exponential_backoff_has_explicit_cap() -> None:
     from watch_engine import RetryPolicy
 
@@ -47,6 +70,13 @@ def test_retry_policy_rejects_non_finite_configuration(value: float) -> None:
 
     with pytest.raises(ValueError, match="finite"):
         RetryPolicy(base_delay_seconds=value)
+
+
+def test_retry_policy_rejects_integer_too_large_for_finite_float() -> None:
+    from watch_engine import RetryPolicy
+
+    with pytest.raises(ValueError, match="finite"):
+        RetryPolicy(maximum_delay_seconds=10**10_000)
 
 
 def test_retry_policy_caps_extreme_failure_number_without_overflow() -> None:
@@ -70,6 +100,21 @@ def test_cron_trigger_calculates_next_regular_schedule() -> None:
 def test_cron_trigger_rejects_missing_explicit_timezone() -> None:
     with pytest.raises(ValueError, match="timezone must be explicit"):
         CronTrigger("0 9 * * *", timezone=None)  # type: ignore[arg-type]
+
+
+def test_cron_trigger_rejects_wrong_runtime_types() -> None:
+    with pytest.raises(TypeError, match="expression must be a string"):
+        CronTrigger(123, timezone=UTC)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="timezone must be a tzinfo"):
+        CronTrigger("0 9 * * *", timezone=object())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("keyword", "value"), [("clock", None), ("sleep", 0)])
+def test_cron_trigger_rejects_non_callable_dependencies(
+    keyword: str, value: object
+) -> None:
+    with pytest.raises(TypeError, match=f"{keyword} must be callable"):
+        CronTrigger("0 9 * * *", timezone=UTC, **{keyword: value})  # type: ignore[arg-type]
 
 
 def test_manual_trigger_releases_one_watch_execution(tmp_path: Path) -> None:

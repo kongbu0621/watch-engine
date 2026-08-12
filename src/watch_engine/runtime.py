@@ -29,6 +29,13 @@ class WatchDefinition:
             raise TypeError("watch_id must be a string")
         if not self.watch_id:
             raise ValueError("watch_id must not be empty")
+        for field_name, value, method_name in (
+            ("trigger", self.trigger, "wait_next"),
+            ("observer", self.observer, "observe"),
+            ("transition_policy", self.transition_policy, "evaluate"),
+        ):
+            if not callable(getattr(value, method_name, None)):
+                raise TypeError(f"{field_name} must provide callable {method_name}()")
         if not isinstance(self.observer_retry, RetryPolicy):
             raise TypeError("observer_retry must be a RetryPolicy")
 
@@ -41,6 +48,12 @@ class WatchRuntime:
         clock: Callable[[], datetime] = utc_now,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if not isinstance(store, SQLiteStore):
+            raise TypeError("store must be a SQLiteStore")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        if not callable(sleep):
+            raise TypeError("sleep must be callable")
         self.store = store
         self._clock = clock
         self._sleep = sleep
@@ -94,6 +107,8 @@ class WatchRunner:
     """Small trigger adapter; scheduling remains separate from watch semantics."""
 
     def __init__(self, runtime: WatchRuntime) -> None:
+        if not isinstance(runtime, WatchRuntime):
+            raise TypeError("runtime must be a WatchRuntime")
         self.runtime = runtime
 
     async def run_next(self, definition: WatchDefinition) -> RunResult:

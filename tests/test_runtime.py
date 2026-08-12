@@ -35,6 +35,36 @@ def make_definition(observer: SequenceObserver, policy: object | None = None) ->
     )
 
 
+@pytest.mark.parametrize(("keyword", "value"), [("clock", None), ("sleep", 0)])
+def test_runtime_rejects_non_callable_dependencies(
+    tmp_path: Path, keyword: str, value: object
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    with pytest.raises(TypeError, match=f"{keyword} must be callable"):
+        WatchRuntime(store, **{keyword: value})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("keyword", "message"),
+    [
+        ("trigger", "callable wait_next"),
+        ("observer", "callable observe"),
+        ("transition_policy", "callable evaluate"),
+    ],
+)
+def test_watch_definition_rejects_invalid_collaborators(
+    keyword: str, message: str
+) -> None:
+    values: dict[str, object] = {
+        "trigger": ManualTrigger(),
+        "observer": SequenceObserver([]),
+        "transition_policy": NoEventsPolicy(),
+    }
+    values[keyword] = object()
+    with pytest.raises(TypeError, match=message):
+        WatchDefinition(watch_id="watch", **values)  # type: ignore[arg-type]
+
+
 def test_first_valid_observation_becomes_authoritative(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     observation = Observation.valid({"value": "A"}, observed_at=NOW)

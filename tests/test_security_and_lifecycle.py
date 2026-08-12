@@ -129,6 +129,32 @@ def test_memory_database_fails_fast_instead_of_losing_schema_between_connections
         SQLiteStore(":memory:")
 
 
+@pytest.mark.parametrize("path", [None, 1, object()])
+def test_storage_rejects_wrong_typed_database_paths(path: object) -> None:
+    with pytest.raises(TypeError, match="path must be a string or Path"):
+        SQLiteStore(path)  # type: ignore[arg-type]
+
+
+def test_storage_rejects_empty_database_path() -> None:
+    with pytest.raises(ValueError, match="path must not be empty"):
+        SQLiteStore("")
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value"),
+    [
+        ("observation_id_factory", None),
+        ("event_id_factory", 0),
+        ("clock", "clock"),
+    ],
+)
+def test_storage_rejects_non_callable_dependencies(
+    tmp_path: Path, keyword: str, value: object
+) -> None:
+    with pytest.raises(TypeError, match=f"{keyword} must be callable"):
+        SQLiteStore(tmp_path / "watch.db", **{keyword: value})  # type: ignore[arg-type]
+
+
 def test_storage_public_methods_reject_empty_watch_id(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db")
     with pytest.raises(ValueError, match="watch_id must not be empty"):
@@ -292,6 +318,22 @@ def test_delete_watch_requires_explicit_undelivered_override(tmp_path: Path) -> 
     assert result.outbox_rows_deleted == 1
     assert result.observations_deleted == 2
     assert store.list_observations("lifecycle") == []
+
+
+@pytest.mark.parametrize("invalid_override", ["false", 1, None])
+def test_delete_watch_rejects_truthy_non_boolean_override(
+    tmp_path: Path, invalid_override: object
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_event(store)
+
+    with pytest.raises(TypeError, match="allow_undelivered must be a bool"):
+        store.delete_watch(
+            "lifecycle", allow_undelivered=invalid_override  # type: ignore[arg-type]
+        )
+
+    assert len(store.list_events("lifecycle")) == 1
+    assert store.outbox_rows()[0]["status"] == "PENDING"
 
 
 def test_compact_storage_keeps_database_readable(tmp_path: Path) -> None:

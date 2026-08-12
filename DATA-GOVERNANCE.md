@@ -35,17 +35,21 @@ and test restoration and deletion. The library does not silently choose a legal 
 Repository examples and test fixtures must be synthetic and anonymized. Never commit production
 databases, `.env` files, certificates, keys, customer identifiers, or incident payloads.
 
-For use in mainland China, the adopter—not this general-purpose library—must determine whether the
-Personal Information Protection Law, Data Security Law, Cybersecurity Law, sector rules, consent,
-localization, security assessment, or cross-border transfer requirements apply. Avoid collecting
-personal information where operational state is sufficient, and obtain qualified legal advice for
-regulated or cross-border deployments.
+For use in mainland China, the adopter—not this general-purpose library—must determine which duties
+apply under the Personal Information Protection Law, Data Security Law, Cybersecurity Law, Network
+Data Security Management Regulations, and sector rules, including notice/consent, compliance
+audits, localization, security assessment, and cross-border transfer requirements. Avoid
+collecting personal information where operational state is sufficient, and obtain qualified legal
+advice for regulated or cross-border deployments.
 
 Authoritative references (review the current text at deployment time):
 
 - [Personal Information Protection Law](https://www.stats.gov.cn/gk/tjfg/xgfxfg/202503/t20250310_1958923.html)
 - [Data Security Law](https://www.npc.gov.cn/npc/c2/c30834/202106/t20210610_311888.html)
 - [Cybersecurity Law, amended text effective 2026](https://www.cac.gov.cn/2025-12/29/c_1768735112911946.htm)
+- [Network Data Security Management Regulations](https://app.www.gov.cn/govdata/gov/202409/30/520076/article.html)
+- [Personal Information Protection Compliance Audit Measures](https://www.cac.gov.cn/2025-02/14/c_1741233507681519.htm)
+- [Provisions on Promoting and Regulating Cross-Border Data Flows](https://www.cac.gov.cn/2024-03/22/c_1712776612187994.htm)
 - [CAC cross-border data policy guidance](https://www.cac.gov.cn/2025-10/31/c_1763633376984070.htm)
 
 This document is engineering guidance, not legal advice.

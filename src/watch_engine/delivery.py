@@ -24,9 +24,17 @@ class OutboxDispatcher:
         config: DeliveryConfig | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
+        if not isinstance(store, SQLiteStore):
+            raise TypeError("store must be a SQLiteStore")
+        if not callable(getattr(sink, "deliver", None)):
+            raise TypeError("sink must provide callable deliver()")
+        if config is not None and not isinstance(config, DeliveryConfig):
+            raise TypeError("config must be a DeliveryConfig or None")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
         self.store = store
         self.sink = sink
-        self.config = config or DeliveryConfig()
+        self.config = config if config is not None else DeliveryConfig()
         self._clock = clock
         self._recovered = False
 

@@ -125,6 +125,8 @@ I/O、修改 SQLite 之外的状态或产生无法回滚的副作用。这些操
 在 EventSink 接受事件之后、SQLite 记录成功之前退出；下一个进程会再次发送具有同一
 `event_id` 的已存储事件。EventSink 必须按 `event_id` 去重。失败的投递尝试使用可配置且有上限的
 指数退避，并能在重启后继续。重试耗尽的事件会以 `DEAD` 状态保留，供诊断使用。
+v0.1 的 SQLite 后端只支持一个本机拥有进程和一个活跃 Dispatcher。确认时会校验已完成尝试次数，
+但它不是租约或唯一 claim token；旧 Dispatcher 与替代 Dispatcher 不得重叠运行。
 
 Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策略重试。尝试次数耗尽后，运行时会
 持久化一份 `FAILED` Observation，其中只包含固定内建异常类别和尝试次数；异常消息与下游自定义
@@ -137,7 +139,8 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 
 每个 JSON 字段编码后上限为 1 MiB。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
 旧的终态（`DELIVERED`/`DEAD`）事件历史和非 Authority 观测，`delete_watch()` 默认拒绝删除仍有
-未投递事件的 Watch，`compact_storage()` 应在其他数据库使用者停止后执行 checkpoint 和 vacuum。
+未投递事件的 Watch，只有实际布尔值 `True` 才能覆盖该保护；`compact_storage()` 应在其他数据库
+使用者停止后执行 checkpoint 和 vacuum。
 执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
 
 生产使用前请阅读[安全策略](SECURITY.zh-CN.md)与[数据治理策略](DATA-GOVERNANCE.zh-CN.md)。任何引擎字段都不得

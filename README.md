@@ -133,6 +133,9 @@ Delivery is intentionally **at least once**. A process can die
 after a sink accepts an event but before SQLite records success; the next process will send the
 same stored `event_id` again. Sinks must deduplicate by `event_id`. Failed attempts use configurable,
 bounded exponential backoff and survive restart. Exhausted events remain as `DEAD` diagnostics.
+The v0.1 SQLite backend supports one owning local process and one active dispatcher. Its completed
+attempt count is checked during acknowledgement but is not a lease or unique claim token; old and
+replacement dispatchers must never overlap.
 
 Observer exceptions are retried within a run using the watch's bounded retry policy. When the
 attempt budget is exhausted, the runtime persists one `FAILED` observation with a fixed built-in
@@ -149,7 +152,8 @@ not import internal database models.
 Each encoded JSON field is limited to 1 MiB. Retention is caller-controlled:
 `purge_before(cutoff)` deletes only old terminal (`DELIVERED`/`DEAD`) event history and
 non-authoritative observations, `delete_watch()` refuses undelivered work unless explicitly
-overridden, and `compact_storage()` checkpoints and vacuums after other owners stop. Stop the
+overridden with the actual boolean `True`, and `compact_storage()` checkpoints and vacuums after
+other owners stop. Stop the
 runner and dispatcher before a destructive watch deletion or compaction.
 
 Before production use, read the [security policy](SECURITY.md) and

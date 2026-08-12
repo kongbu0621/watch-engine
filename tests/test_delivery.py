@@ -109,6 +109,41 @@ def test_claim_due_rejects_non_positive_limit(tmp_path: Path, limit: int) -> Non
         store.claim_due(now=NOW, limit=limit)
 
 
+def test_falsey_wrong_typed_time_is_not_replaced_by_clock(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    with pytest.raises(TypeError, match="datetime"):
+        store.claim_due(now=0)  # type: ignore[arg-type]
+
+
+def test_falsey_wrong_typed_retry_time_rolls_back_claim(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_pending_event(store)
+    claimed = store.claim_due(now=NOW)[0]
+
+    with pytest.raises(TypeError, match="datetime"):
+        store.record_delivery_failure(
+            claimed,
+            "failed",
+            retry_at=0,  # type: ignore[arg-type]
+            now=NOW,
+        )
+
+    assert store.outbox_rows()[0]["status"] == "DELIVERING"
+    assert store.delivery_attempt_rows() == []
+
+
+def test_dispatcher_rejects_falsey_wrong_typed_config(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    with pytest.raises(TypeError, match="DeliveryConfig or None"):
+        OutboxDispatcher(store, RecordingSink(), config={})  # type: ignore[arg-type]
+
+
+def test_dispatcher_rejects_sink_without_callable_delivery(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    with pytest.raises(TypeError, match="callable deliver"):
+        OutboxDispatcher(store, object())  # type: ignore[arg-type]
+
+
 def test_delivery_acknowledgement_must_match_claimed_event(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     event = make_pending_event(store)

@@ -114,6 +114,8 @@ v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控�
 `recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
 中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
 at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为 v0.1 支持能力。
+Outbox 确认会校验事件身份、当前状态与已完成尝试计数，但该计数不是租约或唯一 claim token，不能
+补偿违反单所有者约束而产生的重叠 Dispatcher。
 
 ## 5. 核心执行流程
 

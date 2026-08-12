@@ -122,6 +122,21 @@ def test_naive_event_datetime_is_rejected() -> None:
         )
 
 
+def test_non_datetime_event_timestamp_is_rejected_explicitly() -> None:
+    with pytest.raises(TypeError, match="occurred_at must be a datetime"):
+        WatchEvent(
+            schema_version="1.0",
+            event_id="evt-1",
+            watch_id="watch-1",
+            event_type="state.changed",
+            severity="info",
+            occurred_at="2025-01-01T00:00:00Z",  # type: ignore[arg-type]
+            dedupe_key="key",
+            subject={},
+            payload={},
+        )
+
+
 def test_watch_event_rejects_unsupported_schema_version_at_runtime() -> None:
     with pytest.raises(ValueError, match="schema_version"):
         WatchEvent(
@@ -191,6 +206,8 @@ def test_public_result_models_reject_semantically_invalid_runtime_values() -> No
     )
     with pytest.raises(TypeError, match="delivered must be a bool"):
         DeliveryResult(event_id="event", delivered="yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must not contain an error"):
+        DeliveryResult(event_id="event", delivered=True, error="contradiction")
     with pytest.raises(ValueError, match="must not be negative"):
         PurgeResult(events_deleted=-1)
     with pytest.raises(TypeError, match="tuple of WatchEvent"):
