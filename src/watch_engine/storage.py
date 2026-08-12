@@ -21,7 +21,9 @@ from watch_engine.models import (
     Observation,
     ObservationStatus,
     PurgeResult,
+    RunStatus,
     WatchEvent,
+    WatchStatus,
     _require_non_empty_string,
 )
 
@@ -50,6 +52,70 @@ class SQLiteStore:
             "delivery_attempts",
         }
     )
+    _EXPECTED_TABLE_COLUMNS = {
+        "schema_meta": (("version", "INTEGER", 1, None, 0),),
+        "watches": (
+            ("watch_id", "TEXT", 0, None, 1),
+            ("execution_count", "INTEGER", 1, "0", 0),
+            ("run_status", "TEXT", 1, "'IDLE'", 0),
+            ("last_started_at", "TEXT", 0, None, 0),
+            ("last_finished_at", "TEXT", 0, None, 0),
+            ("last_observation_status", "TEXT", 0, None, 0),
+            ("last_error", "TEXT", 0, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+            ("updated_at", "TEXT", 1, None, 0),
+        ),
+        "observations": (
+            ("observation_id", "TEXT", 0, None, 1),
+            ("watch_id", "TEXT", 1, None, 0),
+            ("status", "TEXT", 1, None, 0),
+            ("observed_at", "TEXT", 1, None, 0),
+            ("state_json", "TEXT", 1, None, 0),
+            ("evidence_json", "TEXT", 1, None, 0),
+            ("error", "TEXT", 0, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+        ),
+        "authoritative_states": (
+            ("watch_id", "TEXT", 0, None, 1),
+            ("observation_id", "TEXT", 1, None, 0),
+            ("state_json", "TEXT", 1, None, 0),
+            ("observed_at", "TEXT", 1, None, 0),
+            ("updated_at", "TEXT", 1, None, 0),
+        ),
+        "events": (
+            ("event_id", "TEXT", 0, None, 1),
+            ("watch_id", "TEXT", 1, None, 0),
+            ("schema_version", "TEXT", 1, None, 0),
+            ("event_type", "TEXT", 1, None, 0),
+            ("severity", "TEXT", 1, None, 0),
+            ("occurred_at", "TEXT", 1, None, 0),
+            ("dedupe_key", "TEXT", 1, None, 0),
+            ("subject_json", "TEXT", 1, None, 0),
+            ("payload_json", "TEXT", 1, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+        ),
+        "outbox": (
+            ("outbox_id", "INTEGER", 0, None, 1),
+            ("event_id", "TEXT", 1, None, 0),
+            ("status", "TEXT", 1, None, 0),
+            ("attempts", "INTEGER", 1, "0", 0),
+            ("next_attempt_at", "TEXT", 0, None, 0),
+            ("locked_at", "TEXT", 0, None, 0),
+            ("delivered_at", "TEXT", 0, None, 0),
+            ("last_error", "TEXT", 0, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+            ("updated_at", "TEXT", 1, None, 0),
+        ),
+        "delivery_attempts": (
+            ("attempt_id", "INTEGER", 0, None, 1),
+            ("outbox_id", "INTEGER", 1, None, 0),
+            ("event_id", "TEXT", 1, None, 0),
+            ("attempt_number", "INTEGER", 1, None, 0),
+            ("attempted_at", "TEXT", 1, None, 0),
+            ("status", "TEXT", 1, None, 0),
+            ("error", "TEXT", 0, None, 0),
+        ),
+    }
 
     def __init__(
         self,
@@ -112,9 +178,11 @@ class SQLiteStore:
                     "database is not an initialized watch-engine database"
                 )
             if "schema_meta" in existing_tables:
+                self._validate_table_layout(connection, "schema_meta")
                 rows = connection.execute("SELECT version FROM schema_meta").fetchall()
                 self._validate_schema_meta(rows)
                 self._validate_required_tables(existing_tables)
+                self._validate_table_layouts(connection)
 
     @staticmethod
     def _read_schema_objects(
@@ -176,9 +244,11 @@ class SQLiteStore:
                     "database is not an initialized watch-engine database"
                 )
             if "schema_meta" in existing_tables:
+                self._validate_table_layout(connection, "schema_meta")
                 rows = connection.execute("SELECT version FROM schema_meta").fetchall()
                 self._validate_schema_meta(rows)
                 self._validate_required_tables(existing_tables)
+                self._validate_table_layouts(connection)
 
             connection.executescript(
                 """
@@ -304,6 +374,34 @@ class SQLiteStore:
         missing = self.REQUIRED_TABLES - existing_tables
         if missing:
             raise RuntimeError("watch-engine database schema is incomplete")
+
+    def _validate_table_layouts(self, connection: sqlite3.Connection) -> None:
+        for table_name in self._EXPECTED_TABLE_COLUMNS:
+            self._validate_table_layout(connection, table_name)
+
+    def _validate_table_layout(
+        self, connection: sqlite3.Connection, table_name: str
+    ) -> None:
+        expected = self._EXPECTED_TABLE_COLUMNS[table_name]
+        rows = connection.execute(
+            f"PRAGMA table_info({table_name})"  # noqa: S608 - fixed internal names
+        ).fetchall()
+        actual = tuple(
+            (
+                str(row["name"]),
+                str(row["type"]).upper(),
+                int(row["notnull"]),
+                str(row["dflt_value"])
+                if row["dflt_value"] is not None
+                else None,
+                int(row["pk"]),
+            )
+            for row in rows
+        )
+        if actual != expected:
+            raise RuntimeError(
+                f"watch-engine database table layout is incompatible: {table_name}"
+            )
 
     def _ensure_watch(
         self, connection: sqlite3.Connection, watch_id: str, now: datetime
@@ -592,6 +690,44 @@ class SQLiteStore:
         self._validate_watch_id(watch_id)
         with self._connect() as connection:
             return self._read_authoritative(connection, watch_id)
+
+    def get_watch_status(self, watch_id: str) -> WatchStatus | None:
+        """Return the latest persisted diagnostic snapshot without exposing tables."""
+
+        self._validate_watch_id(watch_id)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT watch_id, execution_count, run_status, last_started_at,
+                       last_finished_at, last_observation_status, last_error
+                FROM watches WHERE watch_id = ?
+                """,
+                (watch_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        last_observation_status = row["last_observation_status"]
+        return WatchStatus(
+            watch_id=str(row["watch_id"]),
+            observation_count=int(row["execution_count"]),
+            run_status=RunStatus(row["run_status"]),
+            last_started_at=(
+                from_iso(row["last_started_at"])
+                if row["last_started_at"] is not None
+                else None
+            ),
+            last_finished_at=(
+                from_iso(row["last_finished_at"])
+                if row["last_finished_at"] is not None
+                else None
+            ),
+            last_observation_status=(
+                ObservationStatus(last_observation_status)
+                if last_observation_status is not None
+                else None
+            ),
+            last_error=row["last_error"],
+        )
 
     def list_observations(self, watch_id: str) -> list[Observation]:
         self._validate_watch_id(watch_id)

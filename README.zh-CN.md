@@ -144,6 +144,11 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 使用者停止后执行 checkpoint 和 vacuum。
 执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
 
+`get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
+模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
+不是深只读对象。应把它们当作快照，不要修改或跨并发任务共享；对这些内存容器的修改不会回写已经
+持久化的 Observation、Authority 或 Event。
+
 生产使用前请阅读[安全策略](SECURITY.zh-CN.md)与[数据治理策略](DATA-GOVERNANCE.zh-CN.md)。任何引擎字段都不得
 包含凭据、个人信息或其他敏感数据。
 库自身日志不会输出调用方可控的 Watch/Event 标识或载荷字段。

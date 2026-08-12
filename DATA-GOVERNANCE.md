@@ -14,6 +14,8 @@ does not persist downstream-controlled exception class names. This protects
 against accidental secrets embedded in exception text. Deliberately supplied model fields cannot
 be classified automatically; adopters must minimize or pseudonymize them before calling the API.
 Library-generated logs also omit caller-controlled watch/event identifiers and payload fields.
+Typed diagnostic snapshots can contain caller-supplied identifiers or errors; adopters must apply
+the same classification and redaction rules before logging or exporting them.
 The engine contains no telemetry or automatic data upload. Network I/O occurs only in adopter-
 provided Observer or EventSink implementations and remains the adopter's responsibility.
 

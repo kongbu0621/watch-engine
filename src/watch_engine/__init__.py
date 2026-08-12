@@ -11,7 +11,9 @@ from watch_engine.models import (
     PurgeResult,
     RetryPolicy,
     RunResult,
+    RunStatus,
     WatchEvent,
+    WatchStatus,
 )
 from watch_engine.runtime import WatchDefinition, WatchRunner, WatchRuntime
 from watch_engine.schema import load_watch_event_schema
@@ -32,6 +34,7 @@ __all__ = [
     "OutboxDispatcher",
     "PurgeResult",
     "RetryPolicy",
+    "RunStatus",
     "RunResult",
     "SQLiteStore",
     "TransitionPolicy",
@@ -39,6 +42,7 @@ __all__ = [
     "WatchDefinition",
     "WatchEvent",
     "WatchRunner",
+    "WatchStatus",
     "WatchRuntime",
     "load_watch_event_schema",
 ]

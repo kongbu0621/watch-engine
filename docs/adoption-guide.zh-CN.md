@@ -297,6 +297,7 @@ your-monitor/
 - 访问/解析失败不会伪造成领域状态；
 - 时间戳包含时区；
 - state 与 evidence 不包含秘密。
+- 不修改或跨线程共享已经返回的 Observation 嵌套 JSON；模型会隔离原始输入，但嵌套容器不是深只读。
 
 ### TransitionPolicy
 
@@ -325,6 +326,8 @@ your-monitor/
 5. Sink 失败后重试；
 6. 重启后继续投递；
 7. 同一事件重复投递被 Sink 幂等处理。
+8. `get_watch_status()` 能在成功和错误运行后返回 typed 诊断，业务日志不得直接输出含调用方字段的
+   整个诊断对象。
 
 ## 13. 跨工程事件消费
 

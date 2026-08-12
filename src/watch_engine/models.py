@@ -19,6 +19,12 @@ class ObservationStatus(StrEnum):
     FAILED = "FAILED"
 
 
+class RunStatus(StrEnum):
+    IDLE = "IDLE"
+    RUNNING = "RUNNING"
+    ERROR = "ERROR"
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One observed fact; only VALID observations may become authoritative."""
@@ -270,6 +276,44 @@ class PurgeResult:
                 raise TypeError(f"{field_name} must be an integer")
             if value < 0:
                 raise ValueError(f"{field_name} must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class WatchStatus:
+    """Read-only diagnostic snapshot for one persisted watch."""
+
+    watch_id: str
+    observation_count: int
+    run_status: RunStatus
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    last_observation_status: ObservationStatus | None = None
+    last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_non_empty_string(self.watch_id, field="watch_id")
+        if isinstance(self.observation_count, bool) or not isinstance(
+            self.observation_count, int
+        ):
+            raise TypeError("observation_count must be an integer")
+        if self.observation_count < 0:
+            raise ValueError("observation_count must not be negative")
+        if not isinstance(self.run_status, RunStatus):
+            raise TypeError("run_status must be a RunStatus")
+        for field_name in ("last_started_at", "last_finished_at"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, require_aware(value, field=field_name))
+        if self.last_observation_status is not None and not isinstance(
+            self.last_observation_status, ObservationStatus
+        ):
+            raise TypeError(
+                "last_observation_status must be an ObservationStatus or None"
+            )
+        if self.last_error is not None:
+            if not isinstance(self.last_error, str):
+                raise TypeError("last_error must be a string or None")
+            object.__setattr__(self, "last_error", bounded_error_text(self.last_error))
 
 
 def _require_non_empty_string(value: object, *, field: str) -> None:

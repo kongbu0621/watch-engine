@@ -66,7 +66,8 @@
 - **WatchDefinition**：以稳定 `watch_id` 组合 Trigger、Observer、TransitionPolicy 和重试配置。
 - **Trigger**：决定一次运行何时可以开始。
 - **Observer**：取得领域证据并返回 Observation。
-- **Observation**：一次不可变观测，质量为 `VALID`、`DEGRADED` 或 `FAILED`。
+- **Observation**：一次独立观测快照，质量为 `VALID`、`DEGRADED` 或 `FAILED`；持久化证据不可被
+  后续模型内存修改回写。
 - **Authority**：某个 Watch 当前最新且可信的 `VALID` Observation。
 - **TransitionPolicy**：由下游提供的纯领域决策逻辑，比较前后 Authority 并创建 EventDraft。
 - **WatchEvent**：由引擎分配稳定身份并持久化的事件信封。
@@ -161,13 +162,15 @@ Trigger 只决定运行时机，不负责取得或解释领域状态。
 - 删除整个 Watch 时，若仍有未投递事件必须默认拒绝，并要求显式破坏性确认；
 - 破坏性确认必须是严格布尔值，其他真值类型不得被解释为确认；
 - POSIX 下 SQLite 数据库及 WAL/SHM 文件权限必须为 `0600`，数据库路径不得为符号链接。
-- 已存在数据库必须先以只读方式验证模块身份和 Schema；身份或版本不符时不得修改表、journal mode
-  或文件权限。
+- 已存在数据库必须先以只读方式验证模块身份、版本、必需表集合及每张表的列签名；身份、版本或
+  表列布局不符时不得修改表、journal mode 或文件权限。
 - v0.1 的 Store 必须使用文件数据库；不支持会在多连接间丢失 Schema 的 `:memory:` 路径，并应 fail-fast。
 - 引擎自身日志不得输出调用方可控的 Watch/Event 标识、载荷或异常消息。
 - 异常类名同样属于下游可控内容；持久诊断只能使用引擎定义的固定内建异常类别。
 - JSON 输入必须严格符合 JSON 数据模型，不得静默把 tuple 转 list 或把非字符串 key 转字符串。
-- JSON 容器嵌套不得超过 100 层；模型必须复制嵌套 JSON，调用方后续修改原对象不得改变已构造模型。
+- JSON 容器嵌套不得超过 100 层；模型必须复制嵌套 JSON，调用方后续修改原对象不得改变已构造
+  模型。frozen dataclass 只冻结字段绑定，不得宣称其内部 JSON 容器是深只读对象；无论采用方如何
+  修改查询所得内存快照，都不得回写已持久化证据或 Authority。
 - 同一 SQLite 数据库的当前部署基线是一个本机监控进程；新增目标优先在该进程内串行执行。
 - 引擎不得包含遥测或自动数据上传；网络 I/O 只属于下游 Observer/EventSink 边界。
 
@@ -184,7 +187,8 @@ Trigger 只决定运行时机，不负责取得或解释领域状态。
 
 ### NFR-03 可诊断性
 
-运行记录、Observation、异常类型、尝试次数、投递尝试和 `DEAD` 状态必须可查询。
+最新 Watch 运行诊断必须通过 typed `get_watch_status()` 查询；Observation、Event、异常类型、尝试
+次数、投递尝试和 `DEAD` 状态必须通过 Public API 可查询，不要求下游读取内部表。
 
 ### NFR-04 可移植性
 

@@ -158,6 +158,12 @@ overridden with the actual boolean `True`, and `compact_storage()` checkpoints a
 other owners stop. Stop the
 runner and dispatcher before a destructive watch deletion or compaction.
 
+`get_watch_status(watch_id)` returns a typed, read-only diagnostic snapshot without requiring
+callers to query internal SQLite tables. Model construction detaches caller-owned JSON and frozen
+dataclasses prevent field reassignment, but nested JSON containers exposed by a model are not
+deeply read-only. Treat them as snapshots and do not mutate or share them across concurrent code;
+such in-memory mutation never writes through to persisted Observation, Authority, or Event rows.
+
 Before production use, read the [security policy](SECURITY.md) and
 [data-governance policy](DATA-GOVERNANCE.md). Engine fields must not contain credentials,
 personal information, or other sensitive data.

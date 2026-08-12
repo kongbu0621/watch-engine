@@ -50,6 +50,7 @@ flowchart TD
 - `WatchDefinition`
 - `WatchRuntime`
 - `WatchRunner`
+- `WatchStatus` / `RunStatus`
 - `Observation`
 - `EventDraft`
 - `WatchEvent`
@@ -62,6 +63,10 @@ flowchart TD
 - `schemas/watch-event-v1.json`
 
 Public API 的兼容性由 Semantic Versioning 管理。
+
+领域模型在构造时复制调用方 JSON，并冻结 dataclass 字段绑定；这隔离了调用方原对象，但不把嵌套
+`dict/list` 变成深只读容器。内存模型是快照，不是 SQLite 的 write-through view；持久化边界会重新
+构造/复制模型，Policy 或采用方对查询结果的内存修改不得改变数据库证据或 Authority。
 
 ### 4.2 Application / Runtime 层
 
@@ -214,6 +219,13 @@ Previous Authority、领域决策、Event 和 New Authority 必须依据同一�
 
 代价是 Policy 必须快速、确定且无外部 I/O。网络访问和不可逆副作用只能发生在 Observer 或 EventSink。
 
+### 7.4 数据库身份先于任何写入
+
+已有 SQLite 文件必须先通过只读连接验证 `schema_meta`、版本、必需表集合和每张表的列签名。只有
+完整匹配已发布 v1 布局后，才能收紧文件权限、启用 WAL/secure-delete 或执行 DDL。空 SQLite 文件
+没有已有业务对象，可作为显式初始化目标。该顺序防止路径误配或同名伪装数据库先被引擎修改、随后
+才因缺列失败。
+
 ## 8. 并发与顺序
 
 v0.1 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠。
@@ -355,6 +367,8 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 - `event_id` 稳定性；
 - Watch Event v1 Schema；
 - Python 支持版本与静态检查。
+- 已有数据库的只读身份/表列签名拒绝路径；
+- typed Watch 运行诊断查询及模型内存修改不回写持久状态。
 
 测试使用 Fake Observer、Policy 和 Sink，不连接真实网站或通知服务。
 
@@ -387,6 +401,7 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 ## 17. 隐私、安全与数据生命周期
 
 - SQLite 路径不得为符号链接；POSIX 下数据库、WAL、SHM 强制为 `0600`，父目录由部署方设为 `0700`；
+- 已有非空 SQLite 必须在任何 chmod、写型 PRAGMA 或 DDL 前只读验证版本、表集合和列签名；
 - Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；库日志也不输出调用方可控的 `watch_id/event_id`；
 - 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
 - 单个 JSON 字段编码上限为 1 MiB，标识符/事件元数据标量和 error 上限为 2,048 字符；

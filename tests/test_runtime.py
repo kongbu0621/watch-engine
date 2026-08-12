@@ -15,6 +15,7 @@ from watch_engine import (
     Observation,
     ObservationStatus,
     RetryPolicy,
+    RunStatus,
     SQLiteStore,
     WatchDefinition,
     WatchRuntime,
@@ -449,6 +450,57 @@ def test_observer_exceptions_use_bounded_retry_then_persist_failed(tmp_path: Pat
     assert result.observation.error == "RuntimeError: operation failed"
     assert sleeps == [1, 2]
     assert store.get_authoritative_observation("example") is None
+    status = store.get_watch_status("example")
+    assert status is not None
+    assert status.observation_count == 1
+    assert status.run_status is RunStatus.IDLE
+    assert status.last_started_at == NOW
+    assert status.last_finished_at == NOW
+    assert status.last_observation_status is ObservationStatus.FAILED
+    assert status.last_error == "RuntimeError: operation failed"
+
+
+def test_watch_status_query_is_typed_and_missing_watch_returns_none(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    assert store.get_watch_status("missing") is None
+
+    runtime = WatchRuntime(store, clock=lambda: NOW)
+    runtime.run_once(
+        make_definition(
+            SequenceObserver([Observation.valid("state", observed_at=NOW)]),
+            NoEventsPolicy(),
+        )
+    )
+
+    status = store.get_watch_status("example")
+    assert status is not None
+    assert status.watch_id == "example"
+    assert status.observation_count == 1
+    assert status.run_status is RunStatus.IDLE
+    assert status.last_observation_status is ObservationStatus.VALID
+    assert status.last_error is None
+
+
+def test_mutating_loaded_snapshot_does_not_write_through_to_sqlite(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    WatchRuntime(store, clock=lambda: NOW).run_once(
+        make_definition(
+            SequenceObserver(
+                [Observation.valid({"nested": ["persisted"]}, observed_at=NOW)]
+            ),
+            NoEventsPolicy(),
+        )
+    )
+
+    loaded = store.get_authoritative_observation("example")
+    assert loaded is not None and isinstance(loaded.state, dict)
+    nested = loaded.state["nested"]
+    assert isinstance(nested, list)
+    nested.append("memory-only")
+
+    reloaded = store.get_authoritative_observation("example")
+    assert reloaded is not None
+    assert reloaded.state == {"nested": ["persisted"]}
 
 
 class InvalidObserver:
@@ -479,6 +531,14 @@ def test_invalid_observer_result_marks_started_run_as_error(tmp_path: Path) -> N
         WatchRuntime(store, clock=lambda: NOW).run_once(definition)
 
     assert read_run_state(database) == ("ERROR", "TypeError: operation failed")
+    status = store.get_watch_status("example")
+    assert status is not None
+    assert status.observation_count == 0
+    assert status.run_status is RunStatus.ERROR
+    assert status.last_started_at == NOW
+    assert status.last_finished_at == NOW
+    assert status.last_observation_status is None
+    assert status.last_error == "TypeError: operation failed"
 
 
 def test_retry_sleep_failure_marks_started_run_as_error(tmp_path: Path) -> None:

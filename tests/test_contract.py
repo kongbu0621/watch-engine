@@ -14,10 +14,13 @@ from watch_engine import (
     DeliveryResult,
     EventDraft,
     Observation,
+    ObservationStatus,
     PurgeResult,
     RunResult,
+    RunStatus,
     SQLiteStore,
     WatchEvent,
+    WatchStatus,
     load_watch_event_schema,
 )
 
@@ -35,6 +38,7 @@ EXPECTED_PUBLIC_API = {
     "OutboxDispatcher",
     "PurgeResult",
     "RetryPolicy",
+    "RunStatus",
     "RunResult",
     "SQLiteStore",
     "TransitionPolicy",
@@ -42,6 +46,7 @@ EXPECTED_PUBLIC_API = {
     "WatchDefinition",
     "WatchEvent",
     "WatchRunner",
+    "WatchStatus",
     "WatchRuntime",
     "load_watch_event_schema",
 }
@@ -240,6 +245,32 @@ def test_public_result_models_reject_semantically_invalid_runtime_values() -> No
         PurgeResult(events_deleted=-1)
     with pytest.raises(TypeError, match="tuple of WatchEvent"):
         RunResult(observation=observation, events=[])  # type: ignore[arg-type]
+
+
+def test_watch_status_rejects_invalid_runtime_values() -> None:
+    with pytest.raises(TypeError, match="observation_count must be an integer"):
+        WatchStatus("watch", True, RunStatus.IDLE)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="observation_count must not be negative"):
+        WatchStatus("watch", -1, RunStatus.IDLE)
+    with pytest.raises(TypeError, match="run_status must be a RunStatus"):
+        WatchStatus("watch", 0, "IDLE")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="last_observation_status"):
+        WatchStatus(
+            "watch",
+            0,
+            RunStatus.IDLE,
+            last_observation_status="VALID",  # type: ignore[arg-type]
+        )
+
+    status = WatchStatus(
+        "watch",
+        1,
+        RunStatus.IDLE,
+        last_started_at=datetime(2025, 1, 1, tzinfo=UTC),
+        last_observation_status=ObservationStatus.VALID,
+    )
+    with pytest.raises(AttributeError):
+        status.observation_count = 2  # type: ignore[misc]
 
 
 def test_models_detach_caller_owned_json_and_event_dict_output() -> None:

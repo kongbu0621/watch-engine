@@ -228,6 +228,37 @@ def test_coincidental_schema_meta_table_does_not_claim_unrelated_database(
     assert journal_mode == "delete"
 
 
+def test_lookalike_table_names_with_wrong_layout_are_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "lookalike.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE schema_meta(version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_meta VALUES (1)")
+        for table_name in SQLiteStore.REQUIRED_TABLES - {"schema_meta"}:
+            connection.execute(f'CREATE TABLE "{table_name}"(wrong_column TEXT)')
+    if os.name == "posix":
+        database.chmod(0o644)
+
+    with pytest.raises(RuntimeError, match="table layout is incompatible"):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert tables == SQLiteStore.REQUIRED_TABLES
+    assert journal_mode == "delete"
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o644
+
+
 @pytest.mark.parametrize("path", [None, 1, object()])
 def test_storage_rejects_wrong_typed_database_paths(path: object) -> None:
     with pytest.raises(TypeError, match="path must be a string or Path"):
