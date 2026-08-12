@@ -4,13 +4,14 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-MARKDOWN_FILES = tuple(sorted((*ROOT.glob("README*.md"), *ROOT.glob("docs/*.md"))))
+MARKDOWN_FILES = tuple(sorted((*ROOT.glob("*.md"), *ROOT.glob("docs/*.md"))))
 REQUIRED_PROGRAM_DOCUMENTS = (
     "module-requirements.zh-CN.md",
     "architecture.zh-CN.md",
     "implementation.zh-CN.md",
 )
 REQUIRED_REUSABLE_MODULE_DOCUMENT = "adoption-guide.zh-CN.md"
+REQUIRED_GOVERNANCE_DOCUMENTS = ("SECURITY.zh-CN.md", "DATA-GOVERNANCE.zh-CN.md")
 
 
 def test_required_document_layers_exist_and_are_discoverable() -> None:
@@ -18,6 +19,9 @@ def test_required_document_layers_exist_and_are_discoverable() -> None:
     for name in (*REQUIRED_PROGRAM_DOCUMENTS, REQUIRED_REUSABLE_MODULE_DOCUMENT):
         assert (ROOT / "docs" / name).is_file()
         assert f"(docs/{name})" in chinese_readme
+    for name in REQUIRED_GOVERNANCE_DOCUMENTS:
+        assert (ROOT / name).is_file()
+        assert f"({name})" in chinese_readme
 
 
 def test_relative_markdown_links_resolve() -> None:

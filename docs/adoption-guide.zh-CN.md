@@ -354,7 +354,34 @@ your-monitor/
 
 `watch-engine` 不负责替下游加载或保管秘密。
 
-## 15. 版本升级
+## 15. 数据保留与删除
+
+采用者必须根据业务用途确定保留期限，并由自己的调度或运维系统定期执行清理。引擎不会静默删除
+数据，也不会替业务选择法律保留期限。
+
+```python
+from datetime import UTC, datetime, timedelta
+
+cutoff = datetime.now(UTC) - timedelta(days=30)
+result = store.purge_before(cutoff)
+print(
+    {
+        "observations_deleted": result.observations_deleted,
+        "events_deleted": result.events_deleted,
+        "outbox_rows_deleted": result.outbox_rows_deleted,
+        "delivery_attempts_deleted": result.delivery_attempts_deleted,
+    }
+)
+```
+
+`purge_before()` 只清理 `DELIVERED/DEAD` 事件历史和非 Authority Observation；`PENDING`、
+`RETRY`、`DELIVERING` 以及当前 Authority 不会被删除。可通过 `watch_id=` 只清理一个 Watch。
+
+彻底删除 Watch 前先停止对应 Runner 和 Dispatcher。`delete_watch()` 默认拒绝尚有未投递事件的
+Watch；只有明确接受事件丢失时才使用 `allow_undelivered=True`。停止所有数据库所有者后，可以调用
+`compact_storage()` 做 WAL checkpoint 与 `VACUUM`。数据库外的备份、快照和日志必须单独清理。
+
+## 16. 版本升级
 
 下游应：
 
@@ -373,7 +400,7 @@ Semantic Versioning 解释：
 
 事件 Schema 独立带版本，不能只依据 Python 包版本推断消息格式。
 
-## 16. 采用完成标准
+## 17. 采用完成标准
 
 一个下游只有满足以下条件，才算真正完成采用：
 
@@ -387,7 +414,7 @@ Semantic Versioning 解释：
 - 部署配置、秘密和进程监督由下游管理；
 - 真实运行产生的通用缺口与领域需求被分别记录。
 
-## 17. 反馈通用缺口
+## 18. 反馈通用缺口
 
 发现问题时先判断：
 

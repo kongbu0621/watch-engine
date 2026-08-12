@@ -55,8 +55,6 @@ class OutboxDispatcher:
                 logger.warning(
                     "event delivery failed",
                     extra={
-                        "event_id": claimed.event.event_id,
-                        "watch_id": claimed.event.watch_id,
                         "attempt": failure_number,
                         "will_retry": retry_at is not None,
                         "exception_type": type(exc).__name__,

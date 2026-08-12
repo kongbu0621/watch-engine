@@ -196,3 +196,4 @@ class PurgeResult:
     events_deleted: int = 0
     delivery_attempts_deleted: int = 0
     watches_deleted: int = 0
+    outbox_rows_deleted: int = 0

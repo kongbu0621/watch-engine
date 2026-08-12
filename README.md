@@ -101,8 +101,9 @@ uses ordinary cron expressions and requires an explicit timezone.
 
 ## Persistence and delivery
 
-`SQLiteStore` initializes schema version 1 automatically. It keeps watch run metadata, every
-observation, the authoritative observation, events, outbox rows, and every delivery attempt.
+`SQLiteStore` requires a file-backed database and initializes schema version 1 automatically. It
+keeps watch run metadata, every observation, the authoritative observation, events, outbox rows,
+and every delivery attempt.
 On POSIX systems the database, WAL, and SHM files are forced to owner-only mode (`0600`), and
 symbolic-link database paths are rejected. Deployments should also use an owner-only (`0700`)
 parent directory.
@@ -153,6 +154,7 @@ runner and dispatcher before a destructive watch deletion or compaction.
 Before production use, read the [security policy](SECURITY.md) and
 [data-governance policy](DATA-GOVERNANCE.md). Engine fields must not contain credentials,
 personal information, or other sensitive data.
+Library-generated logs omit caller-controlled watch/event identifiers and payload fields.
 
 ## Development
 

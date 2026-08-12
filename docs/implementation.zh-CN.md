@@ -321,6 +321,26 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 - Event 已创建但 Outbox 丢失；
 - Policy 失败后 Authority 仍被提升。
 
+### 8.5 数据生命周期 API
+
+`SQLiteStore` 只接受文件数据库路径；传入 `:memory:` 会立即抛出 `ValueError`。这是因为存储层的
+每个公开操作都会建立独立连接，SQLite 的普通内存数据库无法在这些连接之间共享 Schema 和状态。
+
+`purge_before()`、`delete_watch()` 返回不含业务载荷和调用方标识符的 `PurgeResult`：
+
+| 字段 | 含义 |
+|---|---|
+| `observations_deleted` | 删除的非 Authority Observation 行数 |
+| `events_deleted` | 删除的 Event 行数 |
+| `delivery_attempts_deleted` | 删除的投递尝试行数 |
+| `watches_deleted` | 删除的 Watch 行数；批量按时间清理时始终为 `0` |
+| `outbox_rows_deleted` | 删除的 Outbox 行数；作为新增字段追加在末尾以保持旧位置参数语义 |
+
+`purge_before()` 只删除截止时间以前的 `DELIVERED/DEAD` 事件链，以及不再被 Authority 引用的
+旧 Observation。`PENDING/RETRY/DELIVERING` 事件与当前 Authority 必须保留。`delete_watch()` 默认
+拒绝删除仍有未投递事件的 Watch；显式传入 `allow_undelivered=True` 才允许覆盖此保护。两个操作
+均在单个 `BEGIN IMMEDIATE` 事务中完成，任一 SQL 失败时整体回滚。
+
 ## 9. Outbox 投递实现
 
 实现位置：
@@ -438,7 +458,9 @@ SQLite 文件当作分布式协调数据库。
 
 ### 13.2 Python 日志
 
-Runtime、Storage 和 Dispatcher 使用标准 `logging`，附带 `watch_id`、`event_id`、尝试次数等上下文。
+Runtime、Storage 和 Dispatcher 使用标准 `logging`，只附带异常类型、尝试次数、时间戳等不含
+调用方业务内容的上下文。库日志不输出 `watch_id`、`event_id`、Observation/Event 内容或异常消息；
+需要业务关联时由下游在完成数据分类和脱敏后自行记录。
 
 引擎不配置 Handler、日志文件或采集服务，这些由下游部署决定。
 
@@ -631,7 +653,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | 风险 | 代码落点 | 验收 |
 |---|---|---|
 | SQLite 默认权限受 umask 影响 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600` 与 symlink 拒绝测试 |
-| 异常消息含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 不进入日志和数据库 |
+| 异常或业务标识含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 与调用方标识不进入库日志，异常消息不进入数据库 |
 | 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
 | 超大持久化字段 | `_json.MAX_JSON_BYTES`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
 | Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |

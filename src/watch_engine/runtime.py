@@ -57,10 +57,7 @@ class WatchRuntime:
             )
             logger.error(
                 "observation persistence or promotion failed",
-                extra={
-                    "watch_id": definition.watch_id,
-                    "exception_type": type(exc).__name__,
-                },
+                extra={"exception_type": type(exc).__name__},
             )
             raise
         return RunResult(observation=observation, events=events)
@@ -74,7 +71,6 @@ class WatchRuntime:
                 logger.warning(
                     "observer attempt failed",
                     extra={
-                        "watch_id": definition.watch_id,
                         "attempt": attempt,
                         "max_attempts": retry.max_attempts,
                         "exception_type": type(exc).__name__,

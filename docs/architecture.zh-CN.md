@@ -379,7 +379,7 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 ## 17. 隐私、安全与数据生命周期
 
 - SQLite 路径不得为符号链接；POSIX 下数据库、WAL、SHM 强制为 `0600`，父目录由部署方设为 `0700`；
-- Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；
+- Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；库日志也不输出调用方可控的 `watch_id/event_id`；
 - 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
 - 单个 JSON 字段编码上限为 1 MiB，error 上限为 2,048 字符；
 - `purge_before()` 只清理终态投递历史与非 Authority 观测，未投递事件与当前 Authority 始终保留；

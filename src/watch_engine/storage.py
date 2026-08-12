@@ -50,7 +50,7 @@ class SQLiteStore:
 
     def _prepare_database_file(self) -> None:
         if self.path == ":memory:":
-            return
+            raise ValueError("SQLiteStore requires a file-backed database path")
         database = Path(self.path)
         if database.is_symlink():
             raise ValueError("SQLite database path must not be a symbolic link")
@@ -326,7 +326,6 @@ class SQLiteStore:
                     logger.info(
                         "stale valid observation retained without authority promotion",
                         extra={
-                            "watch_id": watch_id,
                             "observed_at": to_iso(observation.observed_at),
                             "authority_observed_at": to_iso(previous.observed_at),
                         },
@@ -628,6 +627,7 @@ class SQLiteStore:
                 outbox_ids = [int(row["outbox_id"]) for row in terminal_rows]
                 event_ids = [str(row["event_id"]) for row in terminal_rows]
                 attempts_deleted = 0
+                outbox_deleted = 0
                 events_deleted = 0
                 if outbox_ids:
                     placeholders = ",".join("?" for _ in outbox_ids)
@@ -635,9 +635,9 @@ class SQLiteStore:
                         f"DELETE FROM delivery_attempts WHERE outbox_id IN ({placeholders})",
                         outbox_ids,
                     ).rowcount
-                    connection.execute(
+                    outbox_deleted = connection.execute(
                         f"DELETE FROM outbox WHERE outbox_id IN ({placeholders})", outbox_ids
-                    )
+                    ).rowcount
                     event_placeholders = ",".join("?" for _ in event_ids)
                     events_deleted = connection.execute(
                         f"DELETE FROM events WHERE event_id IN ({event_placeholders})", event_ids
@@ -661,6 +661,7 @@ class SQLiteStore:
         return PurgeResult(
             observations_deleted=observations_deleted,
             events_deleted=events_deleted,
+            outbox_rows_deleted=outbox_deleted,
             delivery_attempts_deleted=attempts_deleted,
         )
 
@@ -688,14 +689,14 @@ class SQLiteStore:
                     """,
                     (watch_id,),
                 ).rowcount
-                connection.execute(
+                outbox_deleted = connection.execute(
                     """
                     DELETE FROM outbox WHERE event_id IN (
                         SELECT event_id FROM events WHERE watch_id = ?
                     )
                     """,
                     (watch_id,),
-                )
+                ).rowcount
                 events_deleted = connection.execute(
                     "DELETE FROM events WHERE watch_id = ?", (watch_id,)
                 ).rowcount
@@ -715,6 +716,7 @@ class SQLiteStore:
         return PurgeResult(
             observations_deleted=observations_deleted,
             events_deleted=events_deleted,
+            outbox_rows_deleted=outbox_deleted,
             delivery_attempts_deleted=attempts_deleted,
             watches_deleted=watches_deleted,
         )

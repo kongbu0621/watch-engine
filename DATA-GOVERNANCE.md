@@ -1,5 +1,7 @@
 # Data Governance and Privacy
 
+English | [简体中文](DATA-GOVERNANCE.zh-CN.md)
+
 ## Data minimization rule
 
 `watch-engine` is designed for operational state, not personal data. Do not put credentials,
@@ -10,6 +12,7 @@ WatchEvent `subject`/`payload`.
 The runtime redacts messages from caught exceptions and stores only their type. This protects
 against accidental secrets embedded in exception text. Deliberately supplied model fields cannot
 be classified automatically; adopters must minimize or pseudonymize them before calling the API.
+Library-generated logs also omit caller-controlled watch/event identifiers and payload fields.
 
 ## Storage and retention
 

@@ -99,8 +99,8 @@ delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 
 ## 持久化与投递
 
-`SQLiteStore` 会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份 Observation、
-authoritative Observation、事件、Outbox 行以及每一次投递尝试。
+`SQLiteStore` 要求使用文件数据库，并会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份
+Observation、authoritative Observation、事件、Outbox 行以及每一次投递尝试。
 在 POSIX 系统上，数据库、WAL 和 SHM 文件会被强制设为仅所有者可读写（`0600`），并拒绝
 符号链接数据库路径；部署时还应将父目录设为仅所有者可访问（`0700`）。
 
@@ -139,8 +139,9 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 未投递事件的 Watch，`compact_storage()` 应在其他数据库使用者停止后执行 checkpoint 和 vacuum。
 执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
 
-生产使用前请阅读[安全策略](SECURITY.md)与[数据治理策略](DATA-GOVERNANCE.md)。任何引擎字段都不得
+生产使用前请阅读[安全策略](SECURITY.zh-CN.md)与[数据治理策略](DATA-GOVERNANCE.zh-CN.md)。任何引擎字段都不得
 包含凭据、个人信息或其他敏感数据。
+库自身日志不会输出调用方可控的 Watch/Event 标识或载荷字段。
 
 ## 设计与采用文档
 
