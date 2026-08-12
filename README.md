@@ -161,9 +161,11 @@ runner and dispatcher before a destructive watch deletion or compaction.
 The SQLite file is an engine-owned storage boundary, not a shared application database. On reopen,
 the store validates the exact v1 user-defined schema objects, columns, foreign keys, status checks,
 the Outbox event uniqueness constraint, and normalized table/index creation SQL before changing the
-file. This includes index ordering and collation, `AUTOINCREMENT`, and the complete table constraint
-set. Do not add adopter tables, views, triggers, or indexes to that file; keep business and personal
-data in separate storage. Delivery claims are bounded to 500 events per batch; the default is 100.
+file. Token-aware normalization preserves SQL token boundaries and quoted literals while ignoring
+format-only differences. Validation includes index ordering and collation, `AUTOINCREMENT`, and the
+complete table constraint set. Do not add adopter tables, views, triggers, or indexes to that file;
+keep business and personal data in separate storage. Delivery claims are bounded to 500 events per
+batch; the default is 100.
 
 `get_watch_status(watch_id)` returns a typed, read-only diagnostic snapshot without requiring
 callers to query internal SQLite tables. Model construction detaches caller-owned JSON and frozen

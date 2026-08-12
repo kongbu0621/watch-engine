@@ -52,7 +52,7 @@ advice for regulated or cross-border deployments.
 
 Authoritative references (review the current text at deployment time):
 
-- [Personal Information Protection Law](https://www.stats.gov.cn/gk/tjfg/xgfxfg/202503/t20250310_1958923.html)
+- [Personal Information Protection Law](https://www.npc.gov.cn/npc/c2/c30834/202108/t20210820_313088.html)
 - [Data Security Law](https://www.npc.gov.cn/npc/c2/c30834/202106/t20210610_311888.html)
 - [Cybersecurity Law, amended text effective 2026](https://www.cac.gov.cn/2025-12/29/c_1768735112911946.htm)
 - [Network Data Security Management Regulations](https://app.www.gov.cn/govdata/gov/202409/30/520076/article.html)

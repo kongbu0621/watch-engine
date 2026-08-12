@@ -170,9 +170,9 @@ watch-engine/
 | `batch_size` | 100 |
 
 `batch_size` 与 Store 的 `claim_due(limit)` 均限制在 1 到 500。领取 SQL 还需要两个时间参数，500
-为 SQLite 历史默认 999 个绑定变量限制保留余量，同时避免形成不受控内存批次。Dispatcher 会继续
-在后续 `dispatch_ready()` 调用中领取剩余到期事件。Observer 重试与 Event 投递重试是两套独立配置，
-不得混用。
+为 [SQLite 历史默认 999 个绑定变量限制](https://www.sqlite.org/limits.html)保留余量，同时避免形成
+不受控内存批次。Dispatcher 会继续在后续 `dispatch_ready()` 调用中领取剩余到期事件。Observer
+重试与 Event 投递重试是两套独立配置，不得混用。
 
 ## 6. Runtime 实现
 
@@ -286,11 +286,12 @@ v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版�
 集合、列名、类型、非空、默认值、主键、Foreign Key、状态 CHECK 以及 Outbox `event_id` 唯一约束，
 并对所有用户表与显式 Index 比较规范化后的 `sqlite_master.sql`，才认定为本模块数据库。期望值
 由唯一的 `_SCHEMA_SQL` 在内存 SQLite 中生成并缓存，避免校验规则与建库 DDL 双份漂移；规范化仅
-忽略关键字大小写、注释和引号外空白，保留引号内字面量大小写与空白。由此可以识别同列名但使用
-`DESC`/不同 Collation 的 Index、移除 `AUTOINCREMENT`、增加额外约束或更改 CHECK 字面量。识别
-使用只读连接，任一不兼容时，在执行写型 PRAGMA、chmod 或任何 watch-engine DDL 前失败。该
-SQLite 文件必须由引擎独占，不允许混放采用方对象或业务数据；空 SQLite 文件没有业务对象，可
-作为显式初始化目标。
+忽略关键字大小写、注释和引号外空白，同时把标识/关键字、引号内容、操作符与标点拆成独立 Token，
+保留 Token 边界和引号内字面量。该设计既容忍格式差异，也避免 `status IN (...)` 与
+`statusin(...)` 在直接删空白后碰撞。由此可以识别同列名但使用 `DESC`/不同 Collation 的 Index、
+移除 `AUTOINCREMENT`、增加额外约束或更改 CHECK 字面量。识别使用只读连接，任一不兼容时，在
+执行写型 PRAGMA、chmod 或任何 watch-engine DDL 前失败。该 SQLite 文件必须由引擎独占，不允许
+混放采用方对象或业务数据；空 SQLite 文件没有业务对象，可作为显式初始化目标。
 
 空库初始化使用一个显式 `BEGIN IMMEDIATE ... COMMIT` 事务创建完整 v1 Schema 和版本行；任一
 建表/建索引动作失败时由连接事务回滚，不能留下会阻断下次启动的半初始化对象。已有且验证通过的
@@ -727,7 +728,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
 | 超大持久化字段 | `_json.MAX_JSON_BYTES`、`MAX_METADATA_CHARACTERS`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
 | 误指、约束缺失或混放对象的 SQLite | 只读身份/版本/完整 Schema 预检 | 拒绝前后对象、journal mode、权限不变 |
-| 同列名但不同 DDL 语义 | 单一 `_SCHEMA_SQL` 与规范化建表/索引 SQL 指纹 | DESC/Collation、AUTOINCREMENT、额外约束和字面量大小写反例 |
+| 同列名或规范化碰撞但不同 DDL 语义 | 单一 `_SCHEMA_SQL` 与 Token 级建表/索引 SQL 指纹 | DESC/Collation、AUTOINCREMENT、额外约束、字面量大小写和 `IN`/函数名碰撞反例 |
 | 首次建库中途失败 | 单事务 Schema + 版本初始化 | Authorizer 阻断 DDL 后零对象残留且可重试 |
 | 投递中断后 claim 卡死 | Dispatcher `finally` 恢复标记 | 同对象确认失败/进程级中断恢复测试 |
 | 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |

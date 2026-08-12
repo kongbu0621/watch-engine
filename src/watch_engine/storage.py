@@ -122,21 +122,13 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
 """
 
 
-def _normalize_schema_sql(sql: str) -> str:
-    normalized: list[str] = []
+def _normalize_schema_sql(sql: str) -> tuple[str, ...]:
+    tokens: list[str] = []
     position = 0
-    quote_end: str | None = None
     while position < len(sql):
         character = sql[position]
         next_character = sql[position + 1] if position + 1 < len(sql) else ""
-        if quote_end is not None:
-            normalized.append(character)
-            if character == quote_end:
-                if next_character == quote_end and quote_end != "]":
-                    normalized.append(next_character)
-                    position += 2
-                    continue
-                quote_end = None
+        if character.isspace():
             position += 1
             continue
         if character == "-" and next_character == "-":
@@ -149,15 +141,62 @@ def _normalize_schema_sql(sql: str) -> str:
             continue
         if character in {"'", '"', "`", "["}:
             quote_end = "]" if character == "[" else character
-            normalized.append(character)
-        elif not character.isspace():
-            normalized.append(character.upper())
+            quoted = [character]
+            position += 1
+            while position < len(sql):
+                quoted_character = sql[position]
+                quoted.append(quoted_character)
+                position += 1
+                if quoted_character != quote_end:
+                    continue
+                if (
+                    quote_end != "]"
+                    and position < len(sql)
+                    and sql[position] == quote_end
+                ):
+                    quoted.append(sql[position])
+                    position += 1
+                    continue
+                break
+            tokens.append("".join(quoted))
+            continue
+        if character.isalnum() or character in {"_", "$"}:
+            token_start = position
+            position += 1
+            while position < len(sql):
+                token_character = sql[position]
+                if not (token_character.isalnum() or token_character in {"_", "$"}):
+                    break
+                position += 1
+            tokens.append(sql[token_start:position].upper())
+            continue
+        three_character_operator = sql[position : position + 3]
+        if three_character_operator == "->>":
+            tokens.append(three_character_operator)
+            position += 3
+            continue
+        two_character_operator = sql[position : position + 2]
+        if two_character_operator in {
+            "||",
+            "<<",
+            ">>",
+            "<=",
+            ">=",
+            "<>",
+            "!=",
+            "==",
+            "->",
+        }:
+            tokens.append(two_character_operator)
+            position += 2
+            continue
+        tokens.append(character)
         position += 1
-    return "".join(normalized)
+    return tuple(tokens)
 
 
 @cache
-def _expected_schema_sql() -> tuple[tuple[str, str, str], ...]:
+def _expected_schema_sql() -> tuple[tuple[str, str, tuple[str, ...]], ...]:
     with sqlite3.connect(":memory:") as connection:
         connection.row_factory = sqlite3.Row
         connection.executescript(_SCHEMA_SQL)
@@ -241,9 +280,15 @@ class SQLiteStore:
         ),
     }
     _EXPECTED_CHECK_FRAGMENTS = {
-        "observations": "CHECK(STATUSIN('VALID','DEGRADED','FAILED'))",
-        "outbox": "CHECK(STATUSIN('PENDING','DELIVERING','RETRY','DELIVERED','DEAD'))",
-        "delivery_attempts": "CHECK(STATUSIN('SUCCEEDED','FAILED'))",
+        "observations": _normalize_schema_sql(
+            "CHECK(status IN ('VALID', 'DEGRADED', 'FAILED'))"
+        ),
+        "outbox": _normalize_schema_sql(
+            "CHECK(status IN ('PENDING', 'DELIVERING', 'RETRY', 'DELIVERED', 'DEAD'))"
+        ),
+        "delivery_attempts": _normalize_schema_sql(
+            "CHECK(status IN ('SUCCEEDED', 'FAILED'))"
+        ),
     }
     _EXPECTED_INDEXES = {
         "idx_observations_watch_time": (
@@ -633,7 +678,11 @@ class SQLiteStore:
                 f"watch-engine database constraints are incompatible: {table_name}"
             )
         normalized = _normalize_schema_sql(row["sql"])
-        if expected not in normalized:
+        contains_expected = any(
+            normalized[position : position + len(expected)] == expected
+            for position in range(len(normalized) - len(expected) + 1)
+        )
+        if not contains_expected:
             raise RuntimeError(
                 f"watch-engine database constraints are incompatible: {table_name}"
             )

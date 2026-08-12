@@ -493,9 +493,15 @@ def test_same_name_and_columns_index_with_changed_semantics_is_rejected(
     with sqlite3.connect(database) as connection:
         connection.execute("DROP INDEX idx_outbox_due")
         connection.execute(replacement_sql)
+    if os.name == "posix":
+        database.chmod(0o640)
+    before = database.read_bytes()
 
     with pytest.raises(RuntimeError, match="incompatible"):
         SQLiteStore(database)
+    assert database.read_bytes() == before
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o640
 
 
 @pytest.mark.parametrize(
@@ -511,6 +517,11 @@ def test_same_name_and_columns_index_with_changed_semantics_is_rejected(
             "observations",
             "'VALID', 'DEGRADED', 'FAILED'",
             "'valid', 'degraded', 'failed'",
+        ),
+        (
+            "observations",
+            "status IN ('VALID', 'DEGRADED', 'FAILED')",
+            "statusin('VALID', 'DEGRADED', 'FAILED')",
         ),
     ],
 )
@@ -533,9 +544,49 @@ def test_same_layout_table_with_changed_schema_sql_is_rejected(
         schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
         connection.execute(f"PRAGMA schema_version = {schema_version + 1}")
         connection.execute("PRAGMA writable_schema = OFF")
+    if os.name == "posix":
+        database.chmod(0o640)
+    before = database.read_bytes()
 
     with pytest.raises(RuntimeError, match="incompatible"):
         SQLiteStore(database)
+    assert database.read_bytes() == before
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o640
+
+
+def test_schema_sql_format_only_differences_remain_compatible(tmp_path: Path) -> None:
+    database = tmp_path / "format-only-schema.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'observations'"
+        ).fetchone()[0]
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_outbox_due'"
+        ).fetchone()[0]
+        formatted_table_sql = table_sql.replace(
+            "CREATE TABLE", "create /* format only */ table"
+        ).replace("status IN", "status\n in")
+        formatted_index_sql = index_sql.replace(
+            "CREATE INDEX", "create /* format only */ index"
+        ).replace(" ON ", "\n on\n ")
+        assert formatted_table_sql != table_sql
+        assert formatted_index_sql != index_sql
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = 'observations'",
+            (formatted_table_sql,),
+        )
+        connection.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type = 'index' AND name = 'idx_outbox_due'",
+            (formatted_index_sql,),
+        )
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {schema_version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+
+    SQLiteStore(database)
 
 
 def test_first_schema_creation_is_atomic_and_retryable(

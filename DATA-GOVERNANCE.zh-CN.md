@@ -46,7 +46,7 @@ typed 诊断快照可能包含调用方提供的标识或 error；采用方在�
 
 权威参考（部署时应重新确认最新有效文本）：
 
-- [中华人民共和国个人信息保护法](https://www.stats.gov.cn/gk/tjfg/xgfxfg/202503/t20250310_1958923.html)
+- [中华人民共和国个人信息保护法](https://www.npc.gov.cn/npc/c2/c30834/202108/t20210820_313088.html)
 - [中华人民共和国数据安全法](https://www.npc.gov.cn/npc/c2/c30834/202106/t20210610_311888.html)
 - [中华人民共和国网络安全法（2026 年起施行的修正版）](https://www.cac.gov.cn/2025-12/29/c_1768735112911946.htm)
 - [网络数据安全管理条例](https://app.www.gov.cn/govdata/gov/202409/30/520076/article.html)
