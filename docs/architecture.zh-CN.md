@@ -374,4 +374,16 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 4. 有故障语义、兼容策略和自动化测试；
 5. 不破坏 Observer、Authority、Policy、Event、Outbox 的可信链路。
 
-首个 `apple-refurb-monitor` 接入的主要目的，是验证这些边界是否真的可用，而不是让核心吸收 Apple 逻辑。
+独立下游接入的主要目的，是验证这些边界是否真的可用，而不是让核心吸收任何特定业务逻辑。公开文档只保留匿名验证结论。
+
+## 17. 隐私、安全与数据生命周期
+
+- SQLite 路径不得为符号链接；POSIX 下数据库、WAL、SHM 强制为 `0600`，父目录由部署方设为 `0700`；
+- Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；
+- 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
+- 单个 JSON 字段编码上限为 1 MiB，error 上限为 2,048 字符；
+- `purge_before()` 只清理终态投递历史与非 Authority 观测，未投递事件与当前 Authority 始终保留；
+- `delete_watch()` 默认拒绝删除未投递事件，显式 override 才允许破坏性删除；
+- `compact_storage()` 只在其他数据库所有者停止后执行；备份、快照、SSD 映射和外部日志不在 SQLite 擦除保证内。
+
+这些措施用于降低意外泄露和无限增长风险，但引擎不是个人信息处理平台或法律合规边界。部署方仍需确定数据分类、保留期限、访问控制及适用法域。

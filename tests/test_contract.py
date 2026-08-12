@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
 import watch_engine
-from watch_engine import SQLiteStore, WatchEvent
+from watch_engine import SQLiteStore, WatchEvent, load_watch_event_schema
 
 EXPECTED_PUBLIC_API = {
     "CronTrigger",
@@ -24,6 +24,7 @@ EXPECTED_PUBLIC_API = {
     "ObservationStatus",
     "Observer",
     "OutboxDispatcher",
+    "PurgeResult",
     "RetryPolicy",
     "RunResult",
     "SQLiteStore",
@@ -33,6 +34,7 @@ EXPECTED_PUBLIC_API = {
     "WatchEvent",
     "WatchRunner",
     "WatchRuntime",
+    "load_watch_event_schema",
 }
 
 
@@ -60,6 +62,11 @@ def test_watch_event_v1_validates_against_published_contract() -> None:
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     validator.validate(event)
+
+
+def test_packaged_schema_matches_repository_contract() -> None:
+    schema_path = Path(__file__).parents[1] / "schemas" / "watch-event-v1.json"
+    assert load_watch_event_schema() == json.loads(schema_path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize(

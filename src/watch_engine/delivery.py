@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
+from watch_engine._errors import safe_exception_text
 from watch_engine._time import utc_now
 from watch_engine.interfaces import EventSink
 from watch_engine.models import DeliveryConfig, DeliveryResult
@@ -42,7 +43,7 @@ class OutboxDispatcher:
             try:
                 self.sink.deliver(claimed.event)
             except Exception as exc:
-                error = str(exc)
+                error = safe_exception_text(exc)
                 failure_number = claimed.attempts + 1
                 retry_at = None
                 if failure_number < self.config.retry.max_attempts:
@@ -58,8 +59,8 @@ class OutboxDispatcher:
                         "watch_id": claimed.event.watch_id,
                         "attempt": failure_number,
                         "will_retry": retry_at is not None,
+                        "exception_type": type(exc).__name__,
                     },
-                    exc_info=True,
                 )
                 results.append(
                     DeliveryResult(event_id=claimed.event.event_id, delivered=False, error=error)

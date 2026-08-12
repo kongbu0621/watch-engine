@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
+from watch_engine._errors import bounded_error_text
 from watch_engine._json import JsonObject, JsonValue, validate_json
 from watch_engine._time import require_aware, to_iso
 
@@ -31,6 +32,8 @@ class Observation:
         )
         validate_json(self.state)
         validate_json(self.evidence)
+        if self.error is not None:
+            object.__setattr__(self, "error", bounded_error_text(self.error))
 
     @classmethod
     def valid(
@@ -181,3 +184,15 @@ class DeliveryResult:
     event_id: str
     delivered: bool
     error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.error is not None:
+            object.__setattr__(self, "error", bounded_error_text(self.error))
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeResult:
+    observations_deleted: int = 0
+    events_deleted: int = 0
+    delivery_attempts_deleted: int = 0
+    watches_deleted: int = 0

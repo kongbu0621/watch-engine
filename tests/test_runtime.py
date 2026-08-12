@@ -349,6 +349,6 @@ def test_observer_exceptions_use_bounded_retry_then_persist_failed(tmp_path: Pat
     result = runtime.run_once(definition)
 
     assert result.observation.status is ObservationStatus.FAILED
-    assert result.observation.error == "network down"
+    assert result.observation.error == "RuntimeError: operation failed"
     assert sleeps == [1, 2]
     assert store.get_authoritative_observation("example") is None

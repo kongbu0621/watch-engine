@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import stat
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from watch_engine._errors import bounded_error_text
 from watch_engine._json import decode_json, encode_json
-from watch_engine._time import from_iso, to_iso, utc_now
+from watch_engine._time import from_iso, require_aware, to_iso, utc_now
 from watch_engine.interfaces import TransitionPolicy
-from watch_engine.models import EventDraft, Observation, ObservationStatus, WatchEvent
+from watch_engine.models import EventDraft, Observation, ObservationStatus, PurgeResult, WatchEvent
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,43 @@ class SQLiteStore:
         self._observation_id_factory = observation_id_factory
         self._event_id_factory = event_id_factory
         self._clock = clock
+        self._prepare_database_file()
         self._initialize()
+
+    def _prepare_database_file(self) -> None:
+        if self.path == ":memory:":
+            return
+        database = Path(self.path)
+        if database.is_symlink():
+            raise ValueError("SQLite database path must not be a symbolic link")
+        flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(database, flags, 0o600)
+        except FileExistsError:
+            if database.is_symlink() or not database.is_file():
+                raise ValueError("SQLite database path must be a regular file") from None
+        else:
+            os.close(descriptor)
+        self._secure_database_files()
+
+    def _secure_database_files(self) -> None:
+        if os.name != "posix" or self.path == ":memory:":
+            return
+        for candidate in (self.path, f"{self.path}-wal", f"{self.path}-shm"):
+            descriptor: int | None = None
+            with suppress(FileNotFoundError):
+                flags = os.O_RDONLY
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                descriptor = os.open(candidate, flags)
+                try:
+                    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                        raise ValueError("SQLite database files must be regular files")
+                    os.fchmod(descriptor, 0o600)
+                finally:
+                    os.close(descriptor)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, isolation_level=None, timeout=5.0)
@@ -49,6 +89,8 @@ class SQLiteStore:
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA secure_delete = ON")
+        self._secure_database_files()
         return connection
 
     def _initialize(self) -> None:
@@ -191,7 +233,7 @@ class SQLiteStore:
                 UPDATE watches SET run_status = 'ERROR', last_error = ?,
                     last_finished_at = ?, updated_at = ? WHERE watch_id = ?
                 """,
-                (error, to_iso(timestamp), to_iso(timestamp), watch_id),
+                (bounded_error_text(error), to_iso(timestamp), to_iso(timestamp), watch_id),
             )
 
     def record_observation(
@@ -539,7 +581,7 @@ class SQLiteStore:
                     status,
                     attempt_number,
                     to_iso(retry_at) if retry_at else None,
-                    error,
+                    bounded_error_text(error),
                     to_iso(timestamp),
                     claimed.outbox_id,
                 ),
@@ -548,9 +590,141 @@ class SQLiteStore:
                 connection.rollback()
                 raise RuntimeError(f"outbox claim {claimed.outbox_id} is no longer active")
             self._insert_attempt(
-                connection, claimed, attempt_number, timestamp, status="FAILED", error=error
+                connection,
+                claimed,
+                attempt_number,
+                timestamp,
+                status="FAILED",
+                error=bounded_error_text(error),
             )
             connection.commit()
+
+    def purge_before(
+        self, cutoff: datetime, *, watch_id: str | None = None
+    ) -> PurgeResult:
+        """Delete old terminal history while preserving authority and undelivered events."""
+        cutoff_text = to_iso(require_aware(cutoff, field="cutoff"))
+        event_filter = "e.created_at < ?"
+        observation_filter = "o.created_at < ?"
+        event_parameters: list[str] = [cutoff_text]
+        observation_parameters: list[str] = [cutoff_text]
+        if watch_id is not None:
+            event_filter += " AND e.watch_id = ?"
+            observation_filter += " AND o.watch_id = ?"
+            event_parameters.append(watch_id)
+            observation_parameters.append(watch_id)
+
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                terminal_rows = connection.execute(
+                    f"""
+                    SELECT o.outbox_id, e.event_id
+                    FROM outbox o JOIN events e ON e.event_id = o.event_id
+                    WHERE {event_filter} AND o.status IN ('DELIVERED', 'DEAD')
+                    """,  # noqa: S608 - only fixed clauses are composed
+                    event_parameters,
+                ).fetchall()
+                outbox_ids = [int(row["outbox_id"]) for row in terminal_rows]
+                event_ids = [str(row["event_id"]) for row in terminal_rows]
+                attempts_deleted = 0
+                events_deleted = 0
+                if outbox_ids:
+                    placeholders = ",".join("?" for _ in outbox_ids)
+                    attempts_deleted = connection.execute(
+                        f"DELETE FROM delivery_attempts WHERE outbox_id IN ({placeholders})",
+                        outbox_ids,
+                    ).rowcount
+                    connection.execute(
+                        f"DELETE FROM outbox WHERE outbox_id IN ({placeholders})", outbox_ids
+                    )
+                    event_placeholders = ",".join("?" for _ in event_ids)
+                    events_deleted = connection.execute(
+                        f"DELETE FROM events WHERE event_id IN ({event_placeholders})", event_ids
+                    ).rowcount
+
+                observations_deleted = connection.execute(
+                    f"""
+                    DELETE FROM observations AS o
+                    WHERE {observation_filter}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM authoritative_states a
+                          WHERE a.observation_id = o.observation_id
+                      )
+                    """,  # noqa: S608 - only fixed clauses are composed
+                    observation_parameters,
+                ).rowcount
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return PurgeResult(
+            observations_deleted=observations_deleted,
+            events_deleted=events_deleted,
+            delivery_attempts_deleted=attempts_deleted,
+        )
+
+    def delete_watch(self, watch_id: str, *, allow_undelivered: bool = False) -> PurgeResult:
+        """Delete one watch after owners stop, refusing queued delivery by default."""
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                undelivered = connection.execute(
+                    """
+                    SELECT COUNT(*) FROM outbox o
+                    JOIN events e ON e.event_id = o.event_id
+                    WHERE e.watch_id = ? AND o.status IN ('PENDING', 'RETRY', 'DELIVERING')
+                    """,
+                    (watch_id,),
+                ).fetchone()[0]
+                if undelivered and not allow_undelivered:
+                    raise RuntimeError("watch has undelivered outbox events")
+
+                attempts_deleted = connection.execute(
+                    """
+                    DELETE FROM delivery_attempts WHERE event_id IN (
+                        SELECT event_id FROM events WHERE watch_id = ?
+                    )
+                    """,
+                    (watch_id,),
+                ).rowcount
+                connection.execute(
+                    """
+                    DELETE FROM outbox WHERE event_id IN (
+                        SELECT event_id FROM events WHERE watch_id = ?
+                    )
+                    """,
+                    (watch_id,),
+                )
+                events_deleted = connection.execute(
+                    "DELETE FROM events WHERE watch_id = ?", (watch_id,)
+                ).rowcount
+                connection.execute(
+                    "DELETE FROM authoritative_states WHERE watch_id = ?", (watch_id,)
+                )
+                observations_deleted = connection.execute(
+                    "DELETE FROM observations WHERE watch_id = ?", (watch_id,)
+                ).rowcount
+                watches_deleted = connection.execute(
+                    "DELETE FROM watches WHERE watch_id = ?", (watch_id,)
+                ).rowcount
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return PurgeResult(
+            observations_deleted=observations_deleted,
+            events_deleted=events_deleted,
+            delivery_attempts_deleted=attempts_deleted,
+            watches_deleted=watches_deleted,
+        )
+
+    def compact_storage(self) -> None:
+        """Checkpoint and compact SQLite after all other store owners have stopped."""
+        with self._connect() as connection:
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("VACUUM")
+        self._secure_database_files()
 
     @staticmethod
     def _insert_attempt(

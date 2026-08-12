@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from watch_engine._errors import safe_exception_text
 from watch_engine._time import utc_now
 from watch_engine.interfaces import Observer, TransitionPolicy, Trigger
 from watch_engine.models import Observation, RetryPolicy, RunResult
@@ -51,10 +52,15 @@ class WatchRuntime:
                 now=self._clock(),
             )
         except Exception as exc:
-            self.store.mark_run_error(definition.watch_id, str(exc), now=self._clock())
-            logger.exception(
+            self.store.mark_run_error(
+                definition.watch_id, safe_exception_text(exc), now=self._clock()
+            )
+            logger.error(
                 "observation persistence or promotion failed",
-                extra={"watch_id": definition.watch_id},
+                extra={
+                    "watch_id": definition.watch_id,
+                    "exception_type": type(exc).__name__,
+                },
             )
             raise
         return RunResult(observation=observation, events=events)
@@ -71,13 +77,13 @@ class WatchRuntime:
                         "watch_id": definition.watch_id,
                         "attempt": attempt,
                         "max_attempts": retry.max_attempts,
+                        "exception_type": type(exc).__name__,
                     },
-                    exc_info=True,
                 )
                 if attempt == retry.max_attempts:
                     return Observation.failed(
                         observed_at=self._clock(),
-                        error=str(exc),
+                        error=safe_exception_text(exc),
                         evidence={"exception_type": type(exc).__name__, "attempts": attempt},
                     )
                 self._sleep(retry.delay_for_failure(attempt))

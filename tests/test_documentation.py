@@ -39,3 +39,11 @@ def test_python_documentation_blocks_are_syntax_valid() -> None:
         blocks = block_pattern.findall(markdown.read_text(encoding="utf-8"))
         for index, block in enumerate(blocks, start=1):
             compile(block, f"{markdown}:python-block-{index}", "exec")
+
+
+def test_public_docs_do_not_name_private_adopters_or_product_targets() -> None:
+    forbidden = ("apple-refurb-monitor", "apple-cn-refurb", "mac studio")
+    for markdown in MARKDOWN_FILES:
+        content = markdown.read_text(encoding="utf-8").lower()
+        for value in forbidden:
+            assert value not in content, f"{value!r} leaked in {markdown.relative_to(ROOT)}"

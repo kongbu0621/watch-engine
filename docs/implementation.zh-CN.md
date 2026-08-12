@@ -444,7 +444,7 @@ Runtime、Storage 和 Dispatcher 使用标准 `logging`，附带 `watch_id`、`e
 
 ### 13.3 DEAD 处理
 
-v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
+v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态，并按保留策略调用 `purge_before()`；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
 
 ## 14. 测试落地方案
 
@@ -511,8 +511,8 @@ CI 还必须：
 4. 离开仓库工作目录后导入 `watch_engine`；
 5. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
 
-这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试，也不声称
-v0.1.0 wheel 包含仓库级 Event Schema。
+这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试。v0.1.1
+还必须验证 `load_watch_event_schema()` 能从安装后的 wheel 读取与仓库根 Schema 相同的内容。
 
 ## 16. 本地验证命令
 
@@ -540,15 +540,14 @@ python -m build
   `site-packages` 导入：通过；
 - wheel 内容核对：不包含仓库级 `schemas/watch-event-v1.json`。
 
-最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。跨工程消费者必须从固定 Tag URL 获取并
-固定保存 Schema；若未来决定把 Schema 作为 package resource 分发，必须增加 wheel 内容测试并以
-新版本发布，不能悄悄改变已经存在的 v0.1.0 产物。
+最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。v0.1.1 增加 package resource 与一致性
+测试；这不会改变已经冻结的 v0.1.0 产物。
 
 ## 17. 版本与发布方案
 
 ### 17.1 当前版本来源
 
-`pyproject.toml` 中的 `project.version = "0.1.0"` 是 Python 包版本来源。
+`pyproject.toml` 中的 `project.version = "0.1.1"` 是下一维护版本的 Python 包版本来源。
 
 ### 17.2 已发布基线
 
@@ -564,6 +563,12 @@ python -m build
 覆盖 `v0.1.0` Tag。后续若真实采用暴露代码、打包或契约修复，应更新包版本并创建新的 Release；
 只有文档变化时，也必须明确它描述的是已发布代码还是未来目标。
 
+### 17.3 包索引发布安全
+
+在 PyPI 名称完成所有权验证和首个可核验版本发布前，公开采用指南只允许从受信任 Git 仓库固定
+Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建干净 sdist/wheel、校验内容与摘要，
+并先验证包名所有权；没有这些条件不得引导使用者执行无来源约束的 `pip install watch-engine`。
+
 ## 18. 需求—架构—实现追踪
 
 | 需求 | 架构对象 | 代码落点 | 状态 |
@@ -578,9 +583,9 @@ python -m build
 | FR-08 事件身份 | Event Model | `EventDraft / WatchEvent / _insert_events` | 已实现 |
 | FR-09 可靠投递 | Outbox / Dispatcher | `outbox`、`delivery_attempts`、`delivery.py` | 已实现 |
 | FR-10 跨工程契约 | Event Schema | `schemas/watch-event-v1.json` | 已实现 |
-| 独立采用验证 | 下游工程 | `apple-refurb-monitor` | 待完成 |
+| 独立采用验证 | 匿名下游工程 | Public API + Schema | 已完成，证据在下游私有记录 |
 | wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
-| Schema wheel 分发 | 打包边界 | v0.1.0 wheel 不包含仓库级 Schema | 已知限制，使用固定 Tag URL |
+| Schema wheel 分发 | 打包边界 | v0.1.1 wheel 包含 package resource | 已实现并测试 |
 | Git Tag / Release | Release 流程 | GitHub `v0.1.0` | 已完成（2026-08-10） |
 
 “已实现”表示代码落点存在；最终完成仍以自动化测试、CI 和真实下游验证为准。
@@ -591,22 +596,15 @@ python -m build
 
 - 确认三层文档和采用指南互相链接；
 - 检查文档示例与 Public API；
-- 确认 PR 仅修改正式文档和仓库维护指引，不修改 Runtime、Schema 或 Public API。
+- 确认需求、架构、实现、采用指南和代码契约同步更新。
 
-### P1：首个真实采用验证
+### P1：独立采用验证
 
-在 `apple-refurb-monitor` 中：
-
-- 实现 Apple Observer；
-- 实现库存 TransitionPolicy；
-- 实现指向通知边界的 EventSink；
-- 以固定版本安装 `watch-engine`；
-- 验证失败证据、Authority、Event、Outbox、重试与重启；
-- 将通用缺口与 Apple 领域需求分开记录。
+一个匿名独立下游已实现领域 Observer、TransitionPolicy 与 EventSink，并验证固定版本安装、失败证据、Authority、Event、Outbox、重试与重启。业务细节和部署证据不进入公开仓库。
 
 ### P2：真实采用后的维护版本
 
-真实采用验证完成后：
+维护版本发布前：
 
 - 修复确认的通用缺口；
 - 重跑 CI；
@@ -628,7 +626,21 @@ python -m build
 - 特定通知供应商；
 - 通用 daemon CLI。
 
-## 20. 文档维护规则
+## 20. v0.1.1 隐私与安全加固落地
+
+| 风险 | 代码落点 | 验收 |
+|---|---|---|
+| SQLite 默认权限受 umask 影响 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600` 与 symlink 拒绝测试 |
+| 异常消息含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 不进入日志和数据库 |
+| 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
+| 超大持久化字段 | `_json.MAX_JSON_BYTES`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
+| Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |
+| 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
+
+部署方应以专用非特权账号运行，数据库目录设为 `0700`，制定并调度保留策略。自动捕获的异常消息会
+被丢弃；调用方主动构造的字段无法由引擎判断是否属于个人信息，因此必须在进入 Public API 前脱敏。
+
+## 21. 文档维护规则
 
 每次程序实现变更都必须判断是否同步更新：
 

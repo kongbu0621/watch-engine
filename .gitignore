@@ -151,6 +151,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -210,6 +212,15 @@ tempCodeRunnerFile.py
 
 # PyPI configuration file
 .pypirc
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.pem
+*.key
 
 # Marimo
 marimo/_static/

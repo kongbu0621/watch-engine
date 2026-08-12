@@ -66,7 +66,7 @@ class HealthTransitions:
         ]
 
 
-class JsonLineSink:
+class SummarySink:
     def __init__(self):
         self.seen = set()
 
@@ -74,7 +74,8 @@ class JsonLineSink:
         if event.event_id in self.seen:
             return
         self.seen.add(event.event_id)
-        print(event.to_dict())
+        # 不记录 subject/payload，避免调用方放入的敏感数据进入日志。
+        print({"event_id": event.event_id, "event_type": event.event_type})
 
 
 store = SQLiteStore("watch-engine.db")
@@ -89,7 +90,7 @@ definition = WatchDefinition(
 result = WatchRuntime(store).run_once(definition)
 
 # Deliver all currently due events. Run this repeatedly in a worker/process loop.
-delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
+delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
 如需调度执行，`await WatchRunner(runtime).run_next(definition)` 会等待一次 Trigger 并执行一次
@@ -100,6 +101,8 @@ delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
 
 `SQLiteStore` 会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份 Observation、
 authoritative Observation、事件、Outbox 行以及每一次投递尝试。
+在 POSIX 系统上，数据库、WAL 和 SHM 文件会被强制设为仅所有者可读写（`0600`），并拒绝
+符号链接数据库路径；部署时还应将父目录设为仅所有者可访问（`0700`）。
 
 持久化过程刻意划分为两个事务边界：
 
@@ -124,12 +127,20 @@ I/O、修改 SQLite 之外的状态或产生无法回滚的副作用。这些操
 指数退避，并能在重启后继续。重试耗尽的事件会以 `DEAD` 状态保留，供诊断使用。
 
 Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策略重试。尝试次数耗尽后，运行时会
-持久化一份 `FAILED` Observation，其中包含异常类型和尝试次数。若 Observer 主动返回
+持久化一份 `FAILED` Observation，其中包含异常类型和尝试次数；异常消息会被主动丢弃。若 Observer 主动返回
 `DEGRADED` 或 `FAILED`，说明它已经对证据完成分类，因此该结果会立即持久化，不会被隐式重试。
 
 所有时间戳都包含时区信息并统一为 UTC。JSON 采用确定性的键排序方式存储。跨项目集成契约是
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json)；使用方应依据该契约，而不是导入
 内部数据库模型。
+
+每个 JSON 字段编码后上限为 1 MiB。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
+旧的终态（`DELIVERED`/`DEAD`）事件历史和非 Authority 观测，`delete_watch()` 默认拒绝删除仍有
+未投递事件的 Watch，`compact_storage()` 应在其他数据库使用者停止后执行 checkpoint 和 vacuum。
+执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
+
+生产使用前请阅读[安全策略](SECURITY.md)与[数据治理策略](DATA-GOVERNANCE.md)。任何引擎字段都不得
+包含凭据、个人信息或其他敏感数据。
 
 ## 设计与采用文档
 
@@ -145,6 +156,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m pip_audit . --progress-spinner=off
 ```
 
 测试套件完全在本地运行，不需要网络或第三方服务。

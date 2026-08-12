@@ -51,6 +51,10 @@ python -m mypy src
 
 下游生产环境应固定明确版本，不直接跟随 `main`。
 
+在维护者完成 PyPI 名称保留并发布可验证产物前，不要执行无来源约束的
+`pip install watch-engine`。应使用受信任仓库的精确 Tag/Commit，并在生产构建中校验提交或制品摘要，
+避免同名包抢注造成 dependency-confusion 风险。
+
 ## 4. 接入职责表
 
 | 能力 | watch-engine | 下游程序 |
@@ -200,7 +204,7 @@ from watch_engine import (
 )
 
 definition = WatchDefinition(
-    watch_id="apple-cn-refurb-mac-studio",
+    watch_id="inventory-cn-target",
     trigger=IntervalTrigger(90, 150),
     observer=InventoryObserver(),
     transition_policy=InventoryTransitions(),
@@ -325,13 +329,8 @@ your-monitor/
 
 ## 13. 跨工程事件消费
 
-当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.0` 的 wheel
-没有携带仓库根目录下的 Schema，因此不能假设安装 Python 包后存在本地
-`schemas/watch-event-v1.json`。应从 Release Tag 获取并随消费者固定保存：
-
-```text
-https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-event-v1.json
-```
+当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.1` 起可通过
+`load_watch_event_schema()` 读取 wheel 内置副本，也可从同版本 Release Tag 获取并随消费者固定保存。
 
 验证，而不是：
 
@@ -401,7 +400,7 @@ Semantic Versioning 解释：
 
 应留在下游：
 
-- Apple 页面结构、SKU、价格和库存语义；
+- 特定厂商页面结构、产品编号、价格和库存语义；
 - 某个服务的认证与速率限制；
 - 微信、邮件等通知格式；
 - 下游进程部署策略；

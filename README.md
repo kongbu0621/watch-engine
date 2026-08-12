@@ -68,7 +68,7 @@ class HealthTransitions:
         ]
 
 
-class JsonLineSink:
+class SummarySink:
     def __init__(self):
         self.seen = set()
 
@@ -76,7 +76,8 @@ class JsonLineSink:
         if event.event_id in self.seen:
             return
         self.seen.add(event.event_id)
-        print(event.to_dict())
+        # Deliberately avoid logging subject/payload: callers may put sensitive data there.
+        print({"event_id": event.event_id, "event_type": event.event_type})
 
 
 store = SQLiteStore("watch-engine.db")
@@ -91,7 +92,7 @@ definition = WatchDefinition(
 result = WatchRuntime(store).run_once(definition)
 
 # Deliver all currently due events. Run this repeatedly in a worker/process loop.
-delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
+delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
 For scheduled execution, `await WatchRunner(runtime).run_next(definition)` waits for one trigger
@@ -102,6 +103,9 @@ uses ordinary cron expressions and requires an explicit timezone.
 
 `SQLiteStore` initializes schema version 1 automatically. It keeps watch run metadata, every
 observation, the authoritative observation, events, outbox rows, and every delivery attempt.
+On POSIX systems the database, WAL, and SHM files are forced to owner-only mode (`0600`), and
+symbolic-link database paths are rejected. Deployments should also use an owner-only (`0700`)
+parent directory.
 
 Persistence deliberately has two transaction boundaries:
 
@@ -131,13 +135,24 @@ bounded exponential backoff and survive restart. Exhausted events remain as `DEA
 
 Observer exceptions are retried within a run using the watch's bounded retry policy. When the
 attempt budget is exhausted, the runtime persists one `FAILED` observation with the exception
-type and attempt count. An observer that deliberately returns `DEGRADED` or `FAILED` has already
+type and attempt count; exception messages are deliberately discarded. An observer that
+deliberately returns `DEGRADED` or `FAILED` has already
 classified its evidence, so that result is persisted immediately and is not retried implicitly.
 
 All timestamps are timezone-aware and normalized to UTC. JSON is stored with deterministic key
 ordering. The cross-project contract is
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json); consumers should use that contract,
 not import internal database models.
+
+Each encoded JSON field is limited to 1 MiB. Retention is caller-controlled:
+`purge_before(cutoff)` deletes only old terminal (`DELIVERED`/`DEAD`) event history and
+non-authoritative observations, `delete_watch()` refuses undelivered work unless explicitly
+overridden, and `compact_storage()` checkpoints and vacuums after other owners stop. Stop the
+runner and dispatcher before a destructive watch deletion or compaction.
+
+Before production use, read the [security policy](SECURITY.md) and
+[data-governance policy](DATA-GOVERNANCE.md). Engine fields must not contain credentials,
+personal information, or other sensitive data.
 
 ## Development
 
@@ -146,6 +161,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m pip_audit . --progress-spinner=off
 ```
 
 The test suite is entirely local and requires no network or third-party service.
