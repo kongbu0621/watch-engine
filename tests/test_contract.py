@@ -107,6 +107,34 @@ def test_watch_event_v1_schema_rejects_invalid_instances(mutation) -> None:  # t
         validator.validate(event)
 
 
+def test_runtime_models_and_schema_share_metadata_length_limit() -> None:
+    too_long = "x" * 2_049
+    with pytest.raises(ValueError, match="must not exceed 2048"):
+        EventDraft(
+            event_type=too_long,
+            severity="info",
+            dedupe_key="key",
+            subject={},
+            payload={},
+        )
+
+    schema = load_watch_event_schema()
+    event = WatchEvent(
+        schema_version="1.0",
+        event_id="evt-1",
+        watch_id="watch-1",
+        event_type="state.changed",
+        severity="info",
+        occurred_at=datetime(2025, 1, 1, tzinfo=UTC),
+        dedupe_key="key",
+        subject={},
+        payload={},
+    ).to_dict()
+    event["event_id"] = too_long
+    with pytest.raises(ValidationError):
+        Draft202012Validator(schema).validate(event)
+
+
 def test_naive_event_datetime_is_rejected() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         WatchEvent(
@@ -258,6 +286,16 @@ def test_ambiguous_sqlite_schema_metadata_fails_fast(tmp_path: Path) -> None:
         connection.execute("INSERT INTO schema_meta(version) VALUES (1)")
 
     with pytest.raises(RuntimeError, match="schema_meta must contain exactly one row"):
+        SQLiteStore(database)
+
+
+def test_non_integer_sqlite_schema_version_fails_fast(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE schema_meta SET version = 1.5")
+
+    with pytest.raises(RuntimeError, match="schema_meta contains an invalid version"):
         SQLiteStore(database)
 
 

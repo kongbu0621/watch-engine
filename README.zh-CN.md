@@ -19,7 +19,8 @@
   不访问网络或外部服务，不执行阻塞 I/O，不发送通知，不修改 SQLite 数据库之外的状态，也不产生
   其他不可逆副作用。
 - `WatchEvent` 是由引擎管理、持久保存的 v1 事件信封。
-- `EventSink` 负责投递事件，并且必须将 `event_id` 作为重试时的幂等键。
+- `EventSink` 成功返回 `None`、失败抛出异常，并且必须将 `event_id` 作为重试时的幂等键；其他
+  返回值按失败处理。
 
 这一区分至关重要：观测失败表示引擎无法可靠地观测目标，并不表示目标发生了状态变化。无论经历
 多少次非 `VALID` Observation，下一次 `VALID` Observation 始终与最后一个 authoritative
@@ -137,7 +138,7 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json)；使用方应依据该契约，而不是导入
 内部数据库模型。
 
-每个 JSON 字段编码后上限为 1 MiB。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
+每个 JSON 字段编码后上限为 1 MiB，标识符/事件元数据标量和错误字段上限为 2,048 字符。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
 旧的终态（`DELIVERED`/`DEAD`）事件历史和非 Authority 观测，`delete_watch()` 默认拒绝删除仍有
 未投递事件的 Watch，只有实际布尔值 `True` 才能覆盖该保护；`compact_storage()` 应在其他数据库
 使用者停止后执行 checkpoint 和 vacuum。

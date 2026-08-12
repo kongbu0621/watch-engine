@@ -104,7 +104,7 @@ Runtime 不解释领域状态，不直接投递通知。
 `OutboxDispatcher`：
 
 - 领取到期 Outbox 记录；
-- 调用 EventSink；
+- 调用 EventSink；只有返回 `None` 才是成功，异常或其他返回值均进入失败记录；
 - 记录成功或失败尝试；
 - 计算有界指数退避；
 - 重试耗尽后标记 `DEAD`。
@@ -113,6 +113,8 @@ v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控�
 `OutboxDispatcher` 均由该进程拥有，新增目标优先在进程内串行执行。
 `recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
 中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
+若当前实例在领取后因确认、时钟或其他内部异常/中断退出本次调用，它会重置自身恢复状态，同一对象
+下次调用也会先恢复遗留 `DELIVERING`。
 at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为 v0.1 支持能力。
 Outbox 确认会校验事件身份、当前状态与已完成尝试计数，但该计数不是租约或唯一 claim token，不能
 补偿违反单所有者约束而产生的重叠 Dispatcher。
@@ -272,8 +274,11 @@ SQLite 不是分布式锁，因此多个主机共享数据库不属于 v0.1 支�
 
 - 不回滚 Authority 或 Event；
 - 保存 Delivery Attempt；
-- 计算下一次投递时间；
+- 以本次 Sink 调用实际完成时间计算下一次投递时间；
 - 耗尽后进入 `DEAD`，等待运维诊断。
+
+EventSink 的成功返回值必须是 `None`。`False`、响应对象等非 `None` 返回值属于契约错误，按失败
+尝试处理，避免适配器误以为返回 `False` 会阻止确认、而引擎却静默丢失事件。
 
 ### 10.5 进程重启
 
@@ -384,7 +389,7 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 - SQLite 路径不得为符号链接；POSIX 下数据库、WAL、SHM 强制为 `0600`，父目录由部署方设为 `0700`；
 - Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；库日志也不输出调用方可控的 `watch_id/event_id`；
 - 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
-- 单个 JSON 字段编码上限为 1 MiB，error 上限为 2,048 字符；
+- 单个 JSON 字段编码上限为 1 MiB，标识符/事件元数据标量和 error 上限为 2,048 字符；
 - `purge_before()` 只清理终态投递历史与非 Authority 观测，未投递事件与当前 Authority 始终保留；
 - `delete_watch()` 默认拒绝删除未投递事件，显式 override 才允许破坏性删除；
 - `compact_storage()` 只在其他数据库所有者停止后执行；备份、快照、SSD 映射和外部日志不在 SQLite 擦除保证内。

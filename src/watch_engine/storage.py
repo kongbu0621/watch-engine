@@ -16,7 +16,14 @@ from watch_engine._errors import bounded_error_text
 from watch_engine._json import decode_json, encode_json
 from watch_engine._time import from_iso, require_aware, to_iso, utc_now
 from watch_engine.interfaces import TransitionPolicy
-from watch_engine.models import EventDraft, Observation, ObservationStatus, PurgeResult, WatchEvent
+from watch_engine.models import (
+    EventDraft,
+    Observation,
+    ObservationStatus,
+    PurgeResult,
+    WatchEvent,
+    _require_non_empty_string,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,17 @@ class SQLiteStore:
     """SQLite persistence with an explicit transactional-outbox boundary."""
 
     SCHEMA_VERSION = 1
+    REQUIRED_TABLES = frozenset(
+        {
+            "schema_meta",
+            "watches",
+            "observations",
+            "authoritative_states",
+            "events",
+            "outbox",
+            "delivery_attempts",
+        }
+    )
 
     def __init__(
         self,
@@ -56,10 +74,13 @@ class SQLiteStore:
         self._observation_id_factory = observation_id_factory
         self._event_id_factory = event_id_factory
         self._clock = clock
-        self._prepare_database_file()
+        database_created = self._prepare_database_file()
+        if not database_created:
+            self._validate_existing_database_read_only()
+        self._secure_database_files()
         self._initialize()
 
-    def _prepare_database_file(self) -> None:
+    def _prepare_database_file(self) -> bool:
         if self.path == ":memory:":
             raise ValueError("SQLiteStore requires a file-backed database path")
         database = Path(self.path)
@@ -73,9 +94,41 @@ class SQLiteStore:
         except FileExistsError:
             if database.is_symlink() or not database.is_file():
                 raise ValueError("SQLite database path must be a regular file") from None
+            return False
         else:
             os.close(descriptor)
-        self._secure_database_files()
+            return True
+
+    def _validate_existing_database_read_only(self) -> None:
+        database_uri = f"{Path(self.path).resolve(strict=True).as_uri()}?mode=ro"
+        with sqlite3.connect(database_uri, uri=True) as connection:
+            connection.row_factory = sqlite3.Row
+            existing_objects = self._read_schema_objects(connection)
+            existing_tables = {
+                name for object_type, name in existing_objects if object_type == "table"
+            }
+            if existing_objects and "schema_meta" not in existing_tables:
+                raise RuntimeError(
+                    "database is not an initialized watch-engine database"
+                )
+            if "schema_meta" in existing_tables:
+                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+                self._validate_schema_meta(rows)
+                self._validate_required_tables(existing_tables)
+
+    @staticmethod
+    def _read_schema_objects(
+        connection: sqlite3.Connection,
+    ) -> set[tuple[str, str]]:
+        return {
+            (str(row["type"]), str(row["name"]))
+            for row in connection.execute(
+                """
+                SELECT type, name FROM sqlite_master
+                WHERE name NOT LIKE 'sqlite_%'
+                """
+            ).fetchall()
+        }
 
     def _secure_database_files(self) -> None:
         if os.name != "posix" or self.path == ":memory:":
@@ -114,6 +167,19 @@ class SQLiteStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
+            existing_objects = self._read_schema_objects(connection)
+            existing_tables = {
+                name for object_type, name in existing_objects if object_type == "table"
+            }
+            if existing_objects and "schema_meta" not in existing_tables:
+                raise RuntimeError(
+                    "database is not an initialized watch-engine database"
+                )
+            if "schema_meta" in existing_tables:
+                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+                self._validate_schema_meta(rows)
+                self._validate_required_tables(existing_tables)
+
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -211,17 +277,33 @@ class SQLiteStore:
                         "INSERT INTO schema_meta(version) VALUES (?)",
                         (self.SCHEMA_VERSION,),
                     )
-                elif len(rows) != 1:
-                    raise RuntimeError("schema_meta must contain exactly one row")
-                elif int(rows[0]["version"]) != self.SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"unsupported database schema {rows[0]['version']}; "
-                        f"expected {self.SCHEMA_VERSION}"
-                    )
+                else:
+                    self._validate_schema_meta(rows)
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
+
+    def _validate_schema_meta(self, rows: Sequence[sqlite3.Row]) -> None:
+        if len(rows) != 1:
+            raise RuntimeError("schema_meta must contain exactly one row")
+        try:
+            raw_version = rows[0]["version"]
+        except (IndexError, KeyError):
+            raise RuntimeError("schema_meta contains an invalid version") from None
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+            raise RuntimeError("schema_meta contains an invalid version")
+        version = raw_version
+        if version != self.SCHEMA_VERSION:
+            raise RuntimeError(
+                f"unsupported database schema {rows[0]['version']}; "
+                f"expected {self.SCHEMA_VERSION}"
+            )
+
+    def _validate_required_tables(self, existing_tables: set[str]) -> None:
+        missing = self.REQUIRED_TABLES - existing_tables
+        if missing:
+            raise RuntimeError("watch-engine database schema is incomplete")
 
     def _ensure_watch(
         self, connection: sqlite3.Connection, watch_id: str, now: datetime
@@ -284,8 +366,10 @@ class SQLiteStore:
         self._validate_watch_id(watch_id)
         timestamp = now if now is not None else self._clock()
         observation_id = self._observation_id_factory()
-        if not isinstance(observation_id, str) or not observation_id:
-            raise ValueError("observation_id_factory must return a non-empty string")
+        try:
+            _require_non_empty_string(observation_id, field="observation_id")
+        except (TypeError, ValueError) as exc:
+            raise type(exc)(f"observation_id_factory returned invalid data: {exc}") from None
         self._persist_observation(watch_id, observation_id, observation, timestamp)
         if observation.status is not ObservationStatus.VALID:
             return ()
@@ -379,7 +463,18 @@ class SQLiteStore:
 
                 # Policy is deliberately inside this atomic promotion decision. Its
                 # public contract therefore requires fast, pure, side-effect-free work.
-                drafts = policy.evaluate(previous, current)
+                raw_drafts = policy.evaluate(previous, current)
+                if isinstance(raw_drafts, (str, bytes)) or not isinstance(
+                    raw_drafts, Sequence
+                ):
+                    raise TypeError(
+                        "transition policy evaluate() must return a sequence of EventDraft"
+                    )
+                drafts = tuple(raw_drafts)
+                if not all(isinstance(draft, EventDraft) for draft in drafts):
+                    raise TypeError(
+                        "transition policy evaluate() must return a sequence of EventDraft"
+                    )
                 created_events = self._insert_events(
                     connection, watch_id, current, drafts, now
                 )
@@ -803,7 +898,11 @@ class SQLiteStore:
     def compact_storage(self) -> None:
         """Checkpoint and compact SQLite after all other store owners have stopped."""
         with self._connect() as connection:
-            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint is None or int(checkpoint[0]) != 0:
+                raise RuntimeError(
+                    "SQLite WAL checkpoint is busy; stop all other database owners"
+                )
             connection.execute("VACUUM")
         self._secure_database_files()
 
@@ -848,7 +947,4 @@ class SQLiteStore:
 
     @staticmethod
     def _validate_watch_id(watch_id: object) -> None:
-        if not isinstance(watch_id, str):
-            raise TypeError("watch_id must be a string")
-        if not watch_id:
-            raise ValueError("watch_id must not be empty")
+        _require_non_empty_string(watch_id, field="watch_id")

@@ -10,6 +10,8 @@ from watch_engine._errors import bounded_error_text
 from watch_engine._json import JsonObject, JsonValue, copy_json
 from watch_engine._time import require_aware, to_iso
 
+MAX_METADATA_CHARACTERS = 2_048
+
 
 class ObservationStatus(StrEnum):
     VALID = "VALID"
@@ -275,3 +277,7 @@ def _require_non_empty_string(value: object, *, field: str) -> None:
         raise TypeError(f"{field} must be a string")
     if not value:
         raise ValueError(f"{field} must not be empty")
+    if len(value) > MAX_METADATA_CHARACTERS:
+        raise ValueError(
+            f"{field} must not exceed {MAX_METADATA_CHARACTERS} characters"
+        )

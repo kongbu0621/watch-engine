@@ -14,18 +14,21 @@ does not persist downstream-controlled exception class names. This protects
 against accidental secrets embedded in exception text. Deliberately supplied model fields cannot
 be classified automatically; adopters must minimize or pseudonymize them before calling the API.
 Library-generated logs also omit caller-controlled watch/event identifiers and payload fields.
+The engine contains no telemetry or automatic data upload. Network I/O occurs only in adopter-
+provided Observer or EventSink implementations and remains the adopter's responsibility.
 
 ## Storage and retention
 
-- JSON fields are limited to 1 MiB encoded size and error fields to 2,048 characters.
+- JSON fields are limited to 1 MiB encoded size; identifiers, scalar event metadata, and error
+  fields are limited to 2,048 characters.
 - POSIX SQLite database, WAL, and SHM files are owner-only (`0600`); use a `0700` parent directory.
 - `purge_before(cutoff, watch_id=...)` removes old terminal event history and non-authoritative
   observations while preserving undelivered events and current Authority.
 - `delete_watch(watch_id)` refuses outstanding delivery by default. The
   `allow_undelivered=True` override is intentionally destructive.
 - `compact_storage()` performs WAL checkpoint and `VACUUM`; run it only after other database owners
-  stop. Secure deletion cannot guarantee erasure from SSD remapping, snapshots, backups, journal
-  exports, or external logs.
+  stop. A busy checkpoint fails explicitly. Secure deletion cannot guarantee erasure from SSD
+  remapping, snapshots, backups, journal exports, or external logs.
 
 Adopters must define a documented retention period, schedule purging, protect and expire backups,
 and test restoration and deletion. The library does not silently choose a legal retention period.

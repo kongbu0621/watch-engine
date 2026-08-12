@@ -181,7 +181,7 @@ Observer 重试与 Event 投递重试是两套独立配置，不得混用。
 - TransitionPolicy；
 - Observer RetryPolicy。
 
-初始化时拒绝空 `watch_id`。
+初始化时拒绝空或超过 2,048 字符的 `watch_id`。
 
 ### 6.2 run_once 执行步骤
 
@@ -195,17 +195,20 @@ Observer 重试与 Event 投递重试是两套独立配置，不得混用。
 2. `_observe()`：
    - 同步调用 `Observer.observe()`；
    - 异常时按 Observer RetryPolicy 调用可注入的 `sleep`；
-   - 重试耗尽后创建 `FAILED` Observation，证据记录异常类型和尝试次数。
+   - 重试耗尽后创建 `FAILED` Observation，证据记录异常类型和尝试次数；
+   - 返回值必须是 `Observation`，错误类型不得穿过存储边界。
 3. `SQLiteStore.record_observation()`：
    - 先持久保存证据；
    - 只有 `VALID` 继续 Authority 提升。
-4. 持久化或提升异常：
+4. Observer 契约、重试 sleep、持久化或提升异常：
    - 调用 `mark_run_error()`；
    - 记录异常日志；
    - 重新抛出，交给下游进程处理。
 5. 返回 `RunResult(observation, events)`。
 
-Clock 和 sleep 均可注入，便于测试时间与重试行为。
+Clock 和 sleep 均可注入，便于测试时间与重试行为。开始标记完成后的内部异常都进入同一错误
+收口；若记录错误时 Clock 再次失败，使用已验证的开始时间，避免 Watch 永久停在 `RUNNING`。若
+`mark_run_error()` 本身失败，仍重新抛出最初异常，不用二次故障覆盖根因。
 
 ### 6.3 WatchRunner
 
@@ -271,7 +274,10 @@ Python 连接参数：
 
 连接会验证 WAL 与 `secure_delete` 的实际返回值，不支持时 fail-fast，而不是假定 PRAGMA 已生效。
 v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
-初始化直接失败，不进行静默迁移或任意选择第一行。
+初始化直接失败，不进行静默迁移或任意选择第一行。建表前先检查已有数据库：存在用户表但没有
+`schema_meta` 时拒绝接管；即使碰巧存在版本值为 `1` 的同名表，也必须具备完整 v1 表集合才认定
+为本模块数据库。识别使用只读连接，版本不兼容或身份不符时，在执行写型 PRAGMA、chmod 或任何
+watch-engine DDL 前失败，避免误指路径后污染其他 SQLite 数据库。
 
 ### 8.2 表结构
 
@@ -318,6 +324,7 @@ v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版�
    - 保留已保存 Observation；
    - 不调用 Policy，不生成 Event。
 4. 在事务内调用 `TransitionPolicy.evaluate(previous, current)`；
+   - 返回值必须是 `EventDraft` 的 `Sequence`；先复制成 tuple 并逐项验证，错误返回不得部分建 Event；
 5. 为每个 EventDraft 插入 `events` 和 `outbox`；
 6. 使用调用 Policy 前保存的规范状态 UPSERT `authoritative_states`；
 7. 一次提交。
@@ -381,19 +388,25 @@ stateDiagram-v2
 1. 当前 Dispatcher 实例首次运行时调用 `recover_in_flight()`，在取得数据库唯一投递所有权后恢复
    上个进程遗留的 `DELIVERING`；
 2. 按 `batch_size` 调用 `claim_due()`；
-3. 对每个 ClaimedEvent 同步调用 `EventSink.deliver()`；
+3. 对每个 ClaimedEvent 同步调用 `EventSink.deliver()`；成功必须返回 `None`，异常或任意非 `None`
+   返回值均视为失败；
 4. 成功：`record_delivery_success()`，写入成功尝试并设为 `DELIVERED`；
 5. 失败：
    - 计算 `failure_number = attempts + 1`；
    - 未耗尽则设置 `RETRY` 和 `next_attempt_at`；
    - 耗尽则设置 `DEAD`；
    - 保存错误和失败尝试；
-6. 返回 `DeliveryResult` 集合。
+6. 成功时间、失败时间和重试起点使用各次 Sink 调用的实际完成时间，而不是整批领取时间；
+7. 返回 `DeliveryResult` 集合。
 
 成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、已完成尝试计数 `attempts` 和
 `DELIVERING` 状态；事件错配、尝试计数错配或已经不活跃的 claim 不得更新 Outbox，也不得生成
 投递审计行。`attempts` 不是唯一 claim token：在违反单所有者基线、让旧 Dispatcher 与恢复后的
 新 Dispatcher 重叠运行时，重新领取且尚未完成的新 claim 可能具有相同计数，v0.1 不承诺区分它们。
+若领取提交后发生 Clock、行恢复、SQLite 确认异常或进程级中断，当前调用不掩盖异常，但会在
+`finally` 中清除本实例的恢复标记；
+同一 Dispatcher 下一次调用会先恢复遗留 `DELIVERING`，不要求重启进程或重建对象。Sink 可能已
+接受该事件，因此恢复投递仍依赖 `event_id` 幂等。
 
 ### 9.3 一致性语义
 
@@ -417,6 +430,7 @@ v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_fli
 - 拒绝 `NaN` 与正负无穷；
 - 最多允许 100 层容器嵌套，避免无环超深输入触发 Python 递归栈异常；
 - 以 UTF-8 编码后的完整字节数执行 1 MiB 上限；
+- `watch_id/event_id/observation_id/event_type/severity/dedupe_key` 等标量上限为 2,048 字符；
 - 使用稳定 key 排序和紧凑分隔符持久化；
 - 构造领域模型时通过规范编解码复制嵌套数据，保证 frozen dataclass 不被外部可变引用绕过；
 - 从 SQLite 文本恢复时再次执行大小、深度和形状校验，损坏数据不会被静默接受。
@@ -518,7 +532,12 @@ v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动�
 12. SQLite Schema 版本不匹配或 `schema_meta` 歧义时 fail-fast；
 13. 严格 JSON 形状、大小、深度与防御性复制；
 14. Outbox 确认必须与 claim 身份和尝试次数一致；
-15. 超大批量清理不依赖 SQLite 可变长度参数列表。
+15. 超大批量清理不依赖 SQLite 可变长度参数列表；
+16. 已有 SQLite 的身份/版本先只读验证，拒绝时表、journal mode 和权限保持不变；
+17. 确认失败或进程级中断后，同一 Dispatcher 下次调用恢复遗留 claim；
+18. Sink 非 `None` 返回值按失败处理，投递完成时间与重试起点准确；
+19. Observer 返回值、sleep/clock 二次失败不会让运行状态静默卡住或覆盖根因；
+20. WAL checkpoint 繁忙时压缩明确失败，不把未完成 checkpoint 报成成功。
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
@@ -682,7 +701,9 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | SQLite 默认权限受 umask 影响 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600` 与 symlink 拒绝测试 |
 | 异常或业务标识含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 与调用方标识不进入库日志，异常消息不进入数据库 |
 | 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
-| 超大持久化字段 | `_json.MAX_JSON_BYTES`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
+| 超大持久化字段 | `_json.MAX_JSON_BYTES`、`MAX_METADATA_CHARACTERS`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
+| 误指其他 SQLite 数据库 | 只读身份/Schema 预检 | 拒绝前后表、journal mode、权限不变 |
+| 投递中断后 claim 卡死 | Dispatcher `finally` 恢复标记 | 同对象确认失败/进程级中断恢复测试 |
 | 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |
 | 错配或过期 Outbox 确认 | claim 的 event/attempt 条件更新 | 伪造 claim 不改变状态、不写审计行 |
 | Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |

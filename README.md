@@ -21,7 +21,8 @@ provider, or provide a distributed scheduler or web administration UI.
   fast domain decision logic: no network, external-service access, blocking I/O, notifications,
   database-external mutation, or other irreversible side effects.
 - `WatchEvent` is the engine-owned, durable v1 event envelope.
-- `EventSink` delivers events and must treat `event_id` as the retry idempotency key.
+- `EventSink` returns `None` on success or raises on failure, and must treat `event_id` as the
+  retry idempotency key. Other return values are treated as failures.
 
 This distinction is fundamental: an observation failure says the engine could not confidently
 observe the subject. It does not say the subject changed state. After any number of non-valid
@@ -149,7 +150,8 @@ ordering. The cross-project contract is
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json); consumers should use that contract,
 not import internal database models.
 
-Each encoded JSON field is limited to 1 MiB. Retention is caller-controlled:
+Each encoded JSON field is limited to 1 MiB, scalar identifiers/event metadata to 2,048
+characters, and error fields to 2,048 characters. Retention is caller-controlled:
 `purge_before(cutoff)` deletes only old terminal (`DELIVERED`/`DEAD`) event history and
 non-authoritative observations, `delete_watch()` refuses undelivered work unless explicitly
 overridden with the actual boolean `True`, and `compact_storage()` checkpoints and vacuums after

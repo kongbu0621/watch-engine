@@ -31,7 +31,7 @@ class TransitionPolicy(Protocol):
 
 class EventSink(Protocol):
     def deliver(self, event: WatchEvent) -> None:
-        """Deliver an event; implementations must deduplicate retries by event_id."""
+        """Deliver and return None, or raise; deduplicate retries by event_id."""
         ...
 
 

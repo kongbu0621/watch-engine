@@ -10,7 +10,7 @@ from datetime import datetime
 from watch_engine._errors import safe_exception_text, safe_exception_type
 from watch_engine._time import utc_now
 from watch_engine.interfaces import Observer, TransitionPolicy, Trigger
-from watch_engine.models import Observation, RetryPolicy, RunResult
+from watch_engine.models import Observation, RetryPolicy, RunResult, _require_non_empty_string
 from watch_engine.storage import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -25,10 +25,7 @@ class WatchDefinition:
     observer_retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.watch_id, str):
-            raise TypeError("watch_id must be a string")
-        if not self.watch_id:
-            raise ValueError("watch_id must not be empty")
+        _require_non_empty_string(self.watch_id, field="watch_id")
         for field_name, value, method_name in (
             ("trigger", self.trigger, "wait_next"),
             ("observer", self.observer, "observe"),
@@ -59,9 +56,12 @@ class WatchRuntime:
         self._sleep = sleep
 
     def run_once(self, definition: WatchDefinition) -> RunResult:
-        self.store.mark_run_started(definition.watch_id, now=self._clock())
-        observation = self._observe(definition)
+        started_at = self._clock()
+        self.store.mark_run_started(definition.watch_id, now=started_at)
         try:
+            observation = self._observe(definition)
+            if not isinstance(observation, Observation):
+                raise TypeError("observer.observe() must return an Observation")
             events = self.store.record_observation(
                 definition.watch_id,
                 observation,
@@ -69,11 +69,27 @@ class WatchRuntime:
                 now=self._clock(),
             )
         except Exception as exc:
-            self.store.mark_run_error(
-                definition.watch_id, safe_exception_text(exc), now=self._clock()
-            )
+            try:
+                failed_at = self._clock()
+            except Exception as clock_exc:
+                failed_at = started_at
+                logger.error(
+                    "runtime clock failed while recording run error; using start time",
+                    extra={"exception_type": safe_exception_type(clock_exc)},
+                )
+            try:
+                self.store.mark_run_error(
+                    definition.watch_id, safe_exception_text(exc), now=failed_at
+                )
+            except Exception as state_exc:
+                # Preserve the causal failure. A secondary status-write error must
+                # not replace the adapter/persistence exception the caller needs.
+                logger.error(
+                    "failed to persist watch run error state",
+                    extra={"exception_type": safe_exception_type(state_exc)},
+                )
             logger.error(
-                "observation persistence or promotion failed",
+                "watch execution failed",
                 extra={"exception_type": safe_exception_type(exc)},
             )
             raise

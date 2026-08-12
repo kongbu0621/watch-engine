@@ -169,6 +169,8 @@ Policy 可以决定首次有效 Observation 是否产生事件。建议默认不
 ## 7. 第三步：实现幂等 EventSink
 
 EventSink 在数据库事务提交后执行。投递是 at-least-once，同一 `event_id` 可能被调用多次。
+成功必须返回 `None`，失败必须抛出异常；返回 `False`、响应对象或其他非 `None` 值会被引擎按失败
+处理，不能作为隐式成功/失败信号。
 
 ```python
 class NotificationSink:
@@ -307,6 +309,7 @@ your-monitor/
 ### EventSink
 
 - 相同 `event_id` 重复调用不会产生重复外部副作用；
+- 成功返回 `None`，失败抛出异常，非 `None` 返回值不会被静默确认；
 - 暂时失败可安全重试；
 - 永久失败可诊断；
 - 发送内容符合 Watch Event v1。

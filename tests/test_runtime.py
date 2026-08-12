@@ -65,6 +65,16 @@ def test_watch_definition_rejects_invalid_collaborators(
         WatchDefinition(watch_id="watch", **values)  # type: ignore[arg-type]
 
 
+def test_watch_definition_rejects_oversized_watch_id() -> None:
+    with pytest.raises(ValueError, match="must not exceed 2048"):
+        WatchDefinition(
+            watch_id="x" * 2_049,
+            trigger=ManualTrigger(),
+            observer=SequenceObserver([]),
+            transition_policy=NoEventsPolicy(),
+        )
+
+
 def test_first_valid_observation_becomes_authoritative(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     observation = Observation.valid({"value": "A"}, observed_at=NOW)
@@ -239,6 +249,14 @@ class MutatingTransitionPolicy:
         return []
 
 
+class InvalidTransitionPolicy:
+    def __init__(self, result: object) -> None:
+        self.result = result
+
+    def evaluate(self, previous: Observation | None, current: Observation) -> object:
+        return self.result
+
+
 def test_policy_cannot_change_persisted_authority_projection(tmp_path: Path) -> None:
     database = tmp_path / "watch.db"
     store = SQLiteStore(database, clock=lambda: NOW)
@@ -302,6 +320,28 @@ def test_policy_failure_preserves_observation_but_not_promotion(tmp_path: Path) 
     recovered_authority = reopened_store.get_authoritative_observation("example")
     assert recovered_authority is not None and recovered_authority.state == "B"
     assert len(reopened_store.outbox_rows()) == 1
+
+
+@pytest.mark.parametrize("invalid_result", [None, "not-drafts", [object()]])
+def test_invalid_policy_result_preserves_evidence_and_rolls_back_promotion(
+    tmp_path: Path, invalid_result: object
+) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    runtime = WatchRuntime(store, clock=lambda: NOW)
+    definition = make_definition(
+        SequenceObserver([Observation.valid("A", observed_at=NOW)]),
+        InvalidTransitionPolicy(invalid_result),
+    )
+
+    with pytest.raises(TypeError, match="sequence of EventDraft"):
+        runtime.run_once(definition)
+
+    assert [item.state for item in store.list_observations("example")] == ["A"]
+    assert store.get_authoritative_observation("example") is None
+    assert store.list_events("example") == []
+    assert store.outbox_rows() == []
+    assert read_run_state(database) == ("ERROR", "TypeError: operation failed")
 
 
 class BlockingObserver:
@@ -409,3 +449,71 @@ def test_observer_exceptions_use_bounded_retry_then_persist_failed(tmp_path: Pat
     assert result.observation.error == "RuntimeError: operation failed"
     assert sleeps == [1, 2]
     assert store.get_authoritative_observation("example") is None
+
+
+class InvalidObserver:
+    def observe(self) -> object:
+        return None
+
+
+def read_run_state(database: Path) -> tuple[str, str | None]:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT run_status, last_error FROM watches WHERE watch_id = 'example'"
+        ).fetchone()
+    assert row is not None
+    return str(row[0]), row[1]
+
+
+def test_invalid_observer_result_marks_started_run_as_error(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    definition = WatchDefinition(
+        watch_id="example",
+        trigger=ManualTrigger(),
+        observer=InvalidObserver(),  # type: ignore[arg-type]
+        transition_policy=NoEventsPolicy(),
+    )
+
+    with pytest.raises(TypeError, match="must return an Observation"):
+        WatchRuntime(store, clock=lambda: NOW).run_once(definition)
+
+    assert read_run_state(database) == ("ERROR", "TypeError: operation failed")
+
+
+def test_retry_sleep_failure_marks_started_run_as_error(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+
+    def broken_sleep(_: float) -> None:
+        raise RuntimeError("scheduler failed")
+
+    definition = make_definition(
+        SequenceObserver([RuntimeError("observer failed")]), NoEventsPolicy()
+    )
+    with pytest.raises(RuntimeError, match="scheduler failed"):
+        WatchRuntime(store, clock=lambda: NOW, sleep=broken_sleep).run_once(definition)
+
+    assert read_run_state(database) == ("ERROR", "RuntimeError: operation failed")
+
+
+def test_later_clock_failure_uses_start_time_for_error_state(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    calls = 0
+
+    def failing_clock() -> datetime:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return NOW
+        raise RuntimeError("clock failed")
+
+    definition = make_definition(
+        SequenceObserver([Observation.valid("state", observed_at=NOW)]),
+        NoEventsPolicy(),
+    )
+    with pytest.raises(RuntimeError, match="clock failed"):
+        WatchRuntime(store, clock=failing_clock).run_once(definition)
+
+    assert read_run_state(database) == ("ERROR", "RuntimeError: operation failed")

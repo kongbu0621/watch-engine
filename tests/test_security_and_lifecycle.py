@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -87,6 +88,13 @@ class BulkEventPolicy:
         ]
 
 
+class FastBusyTimeoutStore(SQLiteStore):
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        connection.execute("PRAGMA busy_timeout = 1")
+        return connection
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission semantics")
 def test_database_and_live_sidecars_are_owner_only(tmp_path: Path) -> None:
     previous = os.umask(0o022)
@@ -127,6 +135,97 @@ def test_symbolic_link_database_is_rejected(tmp_path: Path) -> None:
 def test_memory_database_fails_fast_instead_of_losing_schema_between_connections() -> None:
     with pytest.raises(ValueError, match="file-backed"):
         SQLiteStore(":memory:")
+
+
+def test_existing_unrelated_sqlite_database_is_not_modified(tmp_path: Path) -> None:
+    database = tmp_path / "unrelated.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE private_records(value TEXT)")
+        connection.execute("INSERT INTO private_records VALUES ('keep-me')")
+    if os.name == "posix":
+        database.chmod(0o644)
+
+    with pytest.raises(RuntimeError, match="not an initialized watch-engine database"):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        objects = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ).fetchall()
+        value = connection.execute("SELECT value FROM private_records").fetchone()[0]
+    assert journal_mode == "delete"
+    assert objects == [("private_records",)]
+    assert value == "keep-me"
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(database.stat().st_mode) == 0o644
+
+
+def test_existing_sqlite_database_with_only_a_view_is_not_modified(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "unrelated-view.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE VIEW private_view AS SELECT 'keep-me' AS value")
+
+    with pytest.raises(RuntimeError, match="not an initialized watch-engine database"):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        objects = connection.execute(
+            "SELECT type, name FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+        value = connection.execute("SELECT value FROM private_view").fetchone()[0]
+    assert objects == [("view", "private_view")]
+    assert value == "keep-me"
+
+
+def test_incompatible_database_is_rejected_before_creating_engine_tables(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "future.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE schema_meta(version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_meta VALUES (999)")
+        connection.execute("CREATE TABLE future_private_state(value TEXT)")
+
+    with pytest.raises(RuntimeError, match="unsupported database schema 999"):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert tables == {"schema_meta", "future_private_state"}
+
+
+def test_coincidental_schema_meta_table_does_not_claim_unrelated_database(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "coincidental.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE schema_meta(version INTEGER NOT NULL)")
+        connection.execute("INSERT INTO schema_meta VALUES (1)")
+        connection.execute("CREATE TABLE private_state(value TEXT)")
+
+    with pytest.raises(RuntimeError, match="schema is incomplete"):
+        SQLiteStore(database)
+
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    assert tables == {"schema_meta", "private_state"}
+    assert journal_mode == "delete"
 
 
 @pytest.mark.parametrize("path", [None, 1, object()])
@@ -177,6 +276,21 @@ def test_storage_rejects_invalid_observation_id_factory(tmp_path: Path) -> None:
             StateChangePolicy(),
             now=NOW,
         )
+
+
+def test_storage_rejects_oversized_observation_id_factory_value(tmp_path: Path) -> None:
+    store = SQLiteStore(
+        tmp_path / "watch.db", observation_id_factory=lambda: "x" * 2_049
+    )
+    with pytest.raises(ValueError, match="observation_id_factory.*2048"):
+        store.record_observation(
+            "watch",
+            Observation.valid("state", observed_at=NOW),
+            StateChangePolicy(),
+            now=NOW,
+        )
+
+    assert store.list_observations("watch") == []
 
 
 def test_adoption_guide_does_not_teach_exception_detail_persistence() -> None:
@@ -339,6 +453,29 @@ def test_delete_watch_rejects_truthy_non_boolean_override(
 def test_compact_storage_keeps_database_readable(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     make_event(store)
+    store.compact_storage()
+    assert store.get_authoritative_observation("lifecycle") is not None
+
+
+def test_compact_storage_fails_instead_of_hiding_busy_checkpoint(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "watch.db"
+    store = FastBusyTimeoutStore(database, clock=lambda: NOW)
+    make_event(store)
+    reader = sqlite3.connect(database, isolation_level=None)
+    try:
+        reader.execute("PRAGMA journal_mode = WAL")
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM events").fetchall()
+        with store._connect() as writer:
+            writer.execute("UPDATE watches SET updated_at = updated_at")
+
+        with pytest.raises(RuntimeError, match="checkpoint is busy"):
+            store.compact_storage()
+    finally:
+        reader.close()
+
     store.compact_storage()
     assert store.get_authoritative_observation("lifecycle") is not None
 

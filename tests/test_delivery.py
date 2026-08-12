@@ -39,6 +39,40 @@ class RecordingSink:
             self.processed.append(event.event_id)
 
 
+class FalseReturningSink:
+    def deliver(self, event: WatchEvent) -> bool:
+        return False
+
+
+class InterruptingSink(RecordingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.interrupt_next = True
+
+    def deliver(self, event: WatchEvent) -> None:
+        self.calls.append(event.event_id)
+        if self.interrupt_next:
+            self.interrupt_next = False
+            raise KeyboardInterrupt
+        if event.event_id not in self._seen:
+            self._seen.add(event.event_id)
+            self.processed.append(event.event_id)
+
+
+class FailingAcknowledgementStore(SQLiteStore):
+    def __init__(self, path: str | Path, **kwargs: object) -> None:
+        super().__init__(path, **kwargs)  # type: ignore[arg-type]
+        self.fail_next_acknowledgement = True
+
+    def record_delivery_success(
+        self, claimed: ClaimedEvent, *, now: datetime | None = None
+    ) -> None:
+        if self.fail_next_acknowledgement:
+            self.fail_next_acknowledgement = False
+            raise OSError("simulated acknowledgement failure")
+        super().record_delivery_success(claimed, now=now)
+
+
 def make_pending_event(store: SQLiteStore) -> WatchEvent:
     definition = WatchDefinition(
         watch_id="delivery-watch",
@@ -102,6 +136,73 @@ def test_stable_event_id_supports_downstream_dedupe_after_crash(tmp_path: Path) 
     assert sink.processed == [event.event_id]
 
 
+def test_same_dispatcher_recovers_claim_after_acknowledgement_failure(
+    tmp_path: Path,
+) -> None:
+    store = FailingAcknowledgementStore(tmp_path / "watch.db", clock=lambda: NOW)
+    event = make_pending_event(store)
+    sink = RecordingSink()
+    dispatcher = OutboxDispatcher(store, sink, clock=lambda: NOW)
+
+    with pytest.raises(OSError, match="acknowledgement failure"):
+        dispatcher.dispatch_ready()
+
+    assert store.outbox_rows()[0]["status"] == "DELIVERING"
+    result = dispatcher.dispatch_ready()
+
+    assert result[0].delivered is True
+    assert sink.calls == [event.event_id, event.event_id]
+    assert sink.processed == [event.event_id]
+    assert store.outbox_rows()[0]["status"] == "DELIVERED"
+
+
+def test_same_dispatcher_recovers_claim_after_process_level_interruption(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    event = make_pending_event(store)
+    sink = InterruptingSink()
+    dispatcher = OutboxDispatcher(store, sink, clock=lambda: NOW)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatcher.dispatch_ready()
+
+    assert store.outbox_rows()[0]["status"] == "DELIVERING"
+    assert dispatcher.dispatch_ready()[0].delivered is True
+    assert sink.calls == [event.event_id, event.event_id]
+    assert sink.processed == [event.event_id]
+
+
+def test_delivery_timestamps_use_actual_completion_time(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_pending_event(store)
+    completed_at = NOW + timedelta(seconds=30)
+    times = iter((NOW, completed_at))
+
+    OutboxDispatcher(store, RecordingSink(), clock=lambda: next(times)).dispatch_ready()
+
+    assert store.outbox_rows()[0]["delivered_at"] == "2025-01-01T12:00:30Z"
+
+
+def test_retry_delay_starts_when_failed_delivery_completes(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_pending_event(store)
+    completed_at = NOW + timedelta(seconds=30)
+    times = iter((NOW, completed_at))
+    retry = RetryPolicy(max_attempts=2, base_delay_seconds=5, maximum_delay_seconds=5)
+
+    OutboxDispatcher(
+        store,
+        RecordingSink(failures=1),
+        config=DeliveryConfig(retry=retry),
+        clock=lambda: next(times),
+    ).dispatch_ready()
+
+    row = store.outbox_rows()[0]
+    assert row["updated_at"] == "2025-01-01T12:00:30Z"
+    assert row["next_attempt_at"] == "2025-01-01T12:00:35Z"
+
+
 @pytest.mark.parametrize("limit", [0, -1])
 def test_claim_due_rejects_non_positive_limit(tmp_path: Path, limit: int) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
@@ -142,6 +243,22 @@ def test_dispatcher_rejects_sink_without_callable_delivery(tmp_path: Path) -> No
     store = SQLiteStore(tmp_path / "watch.db")
     with pytest.raises(TypeError, match="callable deliver"):
         OutboxDispatcher(store, object())  # type: ignore[arg-type]
+
+
+def test_non_none_sink_return_is_a_failed_attempt_not_silent_success(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_pending_event(store)
+
+    result = OutboxDispatcher(
+        store, FalseReturningSink(), clock=lambda: NOW  # type: ignore[arg-type]
+    ).dispatch_ready()
+
+    assert result[0].delivered is False
+    assert result[0].error == "TypeError: operation failed"
+    assert store.outbox_rows()[0]["status"] == "RETRY"
+    assert store.delivery_attempt_rows()[0]["status"] == "FAILED"
 
 
 def test_delivery_acknowledgement_must_match_claimed_event(tmp_path: Path) -> None:
