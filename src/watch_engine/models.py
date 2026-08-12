@@ -11,6 +11,7 @@ from watch_engine._json import JsonObject, JsonValue, copy_json
 from watch_engine._time import require_aware, to_iso
 
 MAX_METADATA_CHARACTERS = 2_048
+_MAX_DELIVERY_BATCH_SIZE = 500
 
 
 class ObservationStatus(StrEnum):
@@ -221,6 +222,10 @@ class DeliveryConfig:
             raise TypeError("batch_size must be an integer")
         if self.batch_size < 1:
             raise ValueError("batch_size must be at least 1")
+        if self.batch_size > _MAX_DELIVERY_BATCH_SIZE:
+            raise ValueError(
+                f"batch_size must be at most {_MAX_DELIVERY_BATCH_SIZE}"
+            )
 
 
 @dataclass(frozen=True, slots=True)

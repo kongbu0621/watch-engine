@@ -476,6 +476,68 @@ def test_missing_or_additional_schema_objects_are_rejected_without_mutation(
         assert stat.S_IMODE(additional_table.stat().st_mode) == 0o644
 
 
+@pytest.mark.parametrize(
+    "replacement_sql",
+    [
+        "CREATE INDEX idx_outbox_due "
+        "ON outbox(status DESC, next_attempt_at, outbox_id)",
+        "CREATE INDEX idx_outbox_due "
+        "ON outbox(status COLLATE NOCASE, next_attempt_at, outbox_id)",
+    ],
+)
+def test_same_name_and_columns_index_with_changed_semantics_is_rejected(
+    tmp_path: Path, replacement_sql: str
+) -> None:
+    database = tmp_path / "changed-index-semantics.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX idx_outbox_due")
+        connection.execute(replacement_sql)
+
+    with pytest.raises(RuntimeError, match="incompatible"):
+        SQLiteStore(database)
+
+
+@pytest.mark.parametrize(
+    ("table_name", "old_sql", "new_sql"),
+    [
+        ("outbox", "AUTOINCREMENT", ""),
+        (
+            "observations",
+            "FOREIGN KEY(watch_id)",
+            "CHECK(length(status) > 0), FOREIGN KEY(watch_id)",
+        ),
+        (
+            "observations",
+            "'VALID', 'DEGRADED', 'FAILED'",
+            "'valid', 'degraded', 'failed'",
+        ),
+    ],
+)
+def test_same_layout_table_with_changed_schema_sql_is_rejected(
+    tmp_path: Path, table_name: str, old_sql: str, new_sql: str
+) -> None:
+    database = tmp_path / "changed-table-semantics.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        schema_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()[0]
+        assert old_sql in schema_sql
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = ?",
+            (schema_sql.replace(old_sql, new_sql), table_name),
+        )
+        schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {schema_version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+
+    with pytest.raises(RuntimeError, match="incompatible"):
+        SQLiteStore(database)
+
+
 def test_first_schema_creation_is_atomic_and_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

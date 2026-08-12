@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -208,6 +209,69 @@ def test_claim_due_rejects_non_positive_limit(tmp_path: Path, limit: int) -> Non
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     with pytest.raises(ValueError, match="at least 1"):
         store.claim_due(now=NOW, limit=limit)
+
+
+def test_delivery_batch_size_and_claim_limit_are_bounded(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="batch_size must be at most 500"):
+        DeliveryConfig(batch_size=501)
+
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="limit must be at most 500"):
+        store.claim_due(now=NOW, limit=501)
+
+
+def test_maximum_claim_batch_remains_within_sqlite_variable_limit(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    timestamp = "2025-01-01T12:00:00Z"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO watches(
+                watch_id, execution_count, run_status, created_at, updated_at
+            ) VALUES (?, 0, 'IDLE', ?, ?)
+            """,
+            ("batch-watch", timestamp, timestamp),
+        )
+        events = [
+            (
+                f"event-{number}",
+                "batch-watch",
+                "1.0",
+                "batch.test",
+                "info",
+                timestamp,
+                f"batch-{number}",
+                "{}",
+                "{}",
+                timestamp,
+            )
+            for number in range(500)
+        ]
+        connection.executemany(
+            """
+            INSERT INTO events(
+                event_id, watch_id, schema_version, event_type, severity,
+                occurred_at, dedupe_key, subject_json, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            events,
+        )
+        connection.executemany(
+            """
+            INSERT INTO outbox(
+                event_id, status, attempts, next_attempt_at, created_at, updated_at
+            ) VALUES (?, 'PENDING', 0, ?, ?, ?)
+            """,
+            ((event[0], timestamp, timestamp, timestamp) for event in events),
+        )
+
+    claimed = store.claim_due(now=NOW, limit=500)
+
+    assert len(claimed) == 500
 
 
 def test_falsey_wrong_typed_time_is_not_replaced_by_clock(tmp_path: Path) -> None:

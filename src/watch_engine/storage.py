@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sqlite3
 import stat
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +18,7 @@ from watch_engine._json import decode_json, encode_json
 from watch_engine._time import from_iso, require_aware, to_iso, utc_now
 from watch_engine.interfaces import TransitionPolicy
 from watch_engine.models import (
+    _MAX_DELIVERY_BATCH_SIZE,
     EventDraft,
     Observation,
     ObservationStatus,
@@ -29,6 +30,152 @@ from watch_engine.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA_SQL = """
+BEGIN IMMEDIATE;
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS watches (
+    watch_id TEXT PRIMARY KEY,
+    execution_count INTEGER NOT NULL DEFAULT 0,
+    run_status TEXT NOT NULL DEFAULT 'IDLE',
+    last_started_at TEXT,
+    last_finished_at TEXT,
+    last_observation_status TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS observations (
+    observation_id TEXT PRIMARY KEY,
+    watch_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('VALID', 'DEGRADED', 'FAILED')),
+    observed_at TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(watch_id) REFERENCES watches(watch_id)
+);
+CREATE INDEX IF NOT EXISTS idx_observations_watch_time
+    ON observations(watch_id, observed_at);
+
+CREATE TABLE IF NOT EXISTS authoritative_states (
+    watch_id TEXT PRIMARY KEY,
+    observation_id TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(watch_id) REFERENCES watches(watch_id),
+    FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    watch_id TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    dedupe_key TEXT NOT NULL,
+    subject_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(watch_id) REFERENCES watches(watch_id)
+);
+CREATE INDEX IF NOT EXISTS idx_events_watch_dedupe
+    ON events(watch_id, dedupe_key);
+
+CREATE TABLE IF NOT EXISTS outbox (
+    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL CHECK(status IN (
+        'PENDING', 'DELIVERING', 'RETRY', 'DELIVERED', 'DEAD'
+    )),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    locked_at TEXT,
+    delivered_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(event_id) REFERENCES events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_due
+    ON outbox(status, next_attempt_at, outbox_id);
+
+CREATE TABLE IF NOT EXISTS delivery_attempts (
+    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    outbox_id INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    attempted_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('SUCCEEDED', 'FAILED')),
+    error TEXT,
+    FOREIGN KEY(outbox_id) REFERENCES outbox(outbox_id),
+    FOREIGN KEY(event_id) REFERENCES events(event_id)
+);
+"""
+
+
+def _normalize_schema_sql(sql: str) -> str:
+    normalized: list[str] = []
+    position = 0
+    quote_end: str | None = None
+    while position < len(sql):
+        character = sql[position]
+        next_character = sql[position + 1] if position + 1 < len(sql) else ""
+        if quote_end is not None:
+            normalized.append(character)
+            if character == quote_end:
+                if next_character == quote_end and quote_end != "]":
+                    normalized.append(next_character)
+                    position += 2
+                    continue
+                quote_end = None
+            position += 1
+            continue
+        if character == "-" and next_character == "-":
+            newline = sql.find("\n", position + 2)
+            position = len(sql) if newline == -1 else newline + 1
+            continue
+        if character == "/" and next_character == "*":
+            comment_end = sql.find("*/", position + 2)
+            position = len(sql) if comment_end == -1 else comment_end + 2
+            continue
+        if character in {"'", '"', "`", "["}:
+            quote_end = "]" if character == "[" else character
+            normalized.append(character)
+        elif not character.isspace():
+            normalized.append(character.upper())
+        position += 1
+    return "".join(normalized)
+
+
+@cache
+def _expected_schema_sql() -> tuple[tuple[str, str, str], ...]:
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.executescript(_SCHEMA_SQL)
+        return tuple(
+            sorted(
+                (
+                    str(row["type"]),
+                    str(row["name"]),
+                    _normalize_schema_sql(str(row["sql"])),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT type, name, sql FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%'
+                    """
+                ).fetchall()
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +398,7 @@ class SQLiteStore:
                 self._validate_table_layouts(connection)
                 self._validate_schema_objects(existing_objects)
                 self._validate_expected_indexes(connection)
+                self._validate_schema_sql(connection)
 
     @staticmethod
     def _read_schema_objects(
@@ -327,101 +475,11 @@ class SQLiteStore:
                 self._validate_table_layouts(connection)
                 self._validate_schema_objects(existing_objects)
                 self._validate_expected_indexes(connection)
+                self._validate_schema_sql(connection)
                 return
 
             try:
-                connection.executescript(
-                    """
-                BEGIN IMMEDIATE;
-
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                    version INTEGER NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS watches (
-                    watch_id TEXT PRIMARY KEY,
-                    execution_count INTEGER NOT NULL DEFAULT 0,
-                    run_status TEXT NOT NULL DEFAULT 'IDLE',
-                    last_started_at TEXT,
-                    last_finished_at TEXT,
-                    last_observation_status TEXT,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS observations (
-                    observation_id TEXT PRIMARY KEY,
-                    watch_id TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('VALID', 'DEGRADED', 'FAILED')),
-                    observed_at TEXT NOT NULL,
-                    state_json TEXT NOT NULL,
-                    evidence_json TEXT NOT NULL,
-                    error TEXT,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(watch_id) REFERENCES watches(watch_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_observations_watch_time
-                    ON observations(watch_id, observed_at);
-
-                CREATE TABLE IF NOT EXISTS authoritative_states (
-                    watch_id TEXT PRIMARY KEY,
-                    observation_id TEXT NOT NULL,
-                    state_json TEXT NOT NULL,
-                    observed_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY(watch_id) REFERENCES watches(watch_id),
-                    FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS events (
-                    event_id TEXT PRIMARY KEY,
-                    watch_id TEXT NOT NULL,
-                    schema_version TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    severity TEXT NOT NULL,
-                    occurred_at TEXT NOT NULL,
-                    dedupe_key TEXT NOT NULL,
-                    subject_json TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(watch_id) REFERENCES watches(watch_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_events_watch_dedupe
-                    ON events(watch_id, dedupe_key);
-
-                CREATE TABLE IF NOT EXISTS outbox (
-                    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    status TEXT NOT NULL CHECK(status IN (
-                        'PENDING', 'DELIVERING', 'RETRY', 'DELIVERED', 'DEAD'
-                    )),
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at TEXT,
-                    locked_at TEXT,
-                    delivered_at TEXT,
-                    last_error TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    FOREIGN KEY(event_id) REFERENCES events(event_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_outbox_due
-                    ON outbox(status, next_attempt_at, outbox_id);
-
-                CREATE TABLE IF NOT EXISTS delivery_attempts (
-                    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    outbox_id INTEGER NOT NULL,
-                    event_id TEXT NOT NULL,
-                    attempt_number INTEGER NOT NULL,
-                    attempted_at TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('SUCCEEDED', 'FAILED')),
-                    error TEXT,
-                    FOREIGN KEY(outbox_id) REFERENCES outbox(outbox_id),
-                    FOREIGN KEY(event_id) REFERENCES events(event_id)
-                );
-
-                    """
-                )
+                connection.executescript(_SCHEMA_SQL)
                 connection.execute(
                     "INSERT INTO schema_meta(version) VALUES (?)",
                     (self.SCHEMA_VERSION,),
@@ -459,6 +517,26 @@ class SQLiteStore:
     ) -> None:
         if existing_objects != self._EXPECTED_SCHEMA_OBJECTS:
             raise RuntimeError("watch-engine database schema objects are incompatible")
+
+    @staticmethod
+    def _validate_schema_sql(connection: sqlite3.Connection) -> None:
+        actual = tuple(
+            sorted(
+                (
+                    str(row["type"]),
+                    str(row["name"]),
+                    _normalize_schema_sql(str(row["sql"])),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT type, name, sql FROM sqlite_master
+                    WHERE name NOT LIKE 'sqlite_%'
+                    """
+                ).fetchall()
+            )
+        )
+        if actual != _expected_schema_sql():
+            raise RuntimeError("watch-engine database schema SQL is incompatible")
 
     def _validate_expected_indexes(self, connection: sqlite3.Connection) -> None:
         for index_name, (table_name, expected_columns) in self._EXPECTED_INDEXES.items():
@@ -554,10 +632,7 @@ class SQLiteStore:
             raise RuntimeError(
                 f"watch-engine database constraints are incompatible: {table_name}"
             )
-        sql_without_comments = re.sub(
-            r"/\*.*?\*/|--[^\r\n]*", "", row["sql"], flags=re.DOTALL
-        )
-        normalized = "".join(sql_without_comments.upper().split())
+        normalized = _normalize_schema_sql(row["sql"])
         if expected not in normalized:
             raise RuntimeError(
                 f"watch-engine database constraints are incompatible: {table_name}"
@@ -978,6 +1053,8 @@ class SQLiteStore:
             raise TypeError("limit must be an integer")
         if limit < 1:
             raise ValueError("limit must be at least 1")
+        if limit > _MAX_DELIVERY_BATCH_SIZE:
+            raise ValueError(f"limit must be at most {_MAX_DELIVERY_BATCH_SIZE}")
         timestamp = now if now is not None else self._clock()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

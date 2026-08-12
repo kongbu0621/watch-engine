@@ -395,7 +395,8 @@ Watch；只有明确接受事件丢失时才使用 `allow_undelivered=True`。�
 6. 备份持久数据库后再执行涉及 Schema migration 的升级。
 
 watch-engine SQLite 文件必须保持引擎独占。不要在其中添加业务表、View、Trigger 或自定义 Index；
-这些对象会使下次启动的只读身份校验失败，业务数据和个人信息应放在采用方自己的独立存储中。
+这些对象会使下次启动的只读身份校验失败。已有表或 Index 的 DDL 语义变化（包括排序、Collation、
+`AUTOINCREMENT` 或约束集合）同样会被拒绝；业务数据和个人信息应放在采用方自己的独立存储中。
 
 Semantic Versioning 解释：
 

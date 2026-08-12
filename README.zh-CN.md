@@ -145,8 +145,10 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
 
 SQLite 文件是引擎独占的存储边界，不是与业务共用的数据库。重新打开时会在改动文件前校验 v1
-全部用户定义 Schema 对象、列、Foreign Key、状态 CHECK 与 Outbox 事件唯一约束。不得向该文件
-增加采用方的表、View、Trigger 或 Index；业务数据和个人信息必须使用独立存储。
+全部用户定义 Schema 对象、列、Foreign Key、状态 CHECK、Outbox 事件唯一约束以及规范化后的完整
+建表/建索引 SQL；其中包括索引排序与 Collation、`AUTOINCREMENT` 和完整表约束集合。不得向该文件
+增加采用方的表、View、Trigger 或 Index；业务数据和个人信息必须使用独立存储。单次投递领取上限
+为 500 个事件，默认值为 100。
 
 `get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
 模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
