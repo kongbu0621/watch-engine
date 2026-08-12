@@ -8,11 +8,15 @@ from watch_engine.models import (
     EventDraft,
     Observation,
     ObservationStatus,
+    PurgeResult,
     RetryPolicy,
     RunResult,
+    RunStatus,
     WatchEvent,
+    WatchStatus,
 )
 from watch_engine.runtime import WatchDefinition, WatchRunner, WatchRuntime
+from watch_engine.schema import load_watch_event_schema
 from watch_engine.storage import SQLiteStore
 from watch_engine.triggers import CronTrigger, IntervalTrigger, ManualTrigger
 
@@ -28,7 +32,9 @@ __all__ = [
     "ObservationStatus",
     "Observer",
     "OutboxDispatcher",
+    "PurgeResult",
     "RetryPolicy",
+    "RunStatus",
     "RunResult",
     "SQLiteStore",
     "TransitionPolicy",
@@ -36,5 +42,7 @@ __all__ = [
     "WatchDefinition",
     "WatchEvent",
     "WatchRunner",
+    "WatchStatus",
     "WatchRuntime",
+    "load_watch_event_schema",
 ]

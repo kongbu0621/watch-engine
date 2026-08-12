@@ -4,13 +4,14 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-MARKDOWN_FILES = tuple(sorted((*ROOT.glob("README*.md"), *ROOT.glob("docs/*.md"))))
+MARKDOWN_FILES = tuple(sorted((*ROOT.glob("*.md"), *ROOT.glob("docs/*.md"))))
 REQUIRED_PROGRAM_DOCUMENTS = (
     "module-requirements.zh-CN.md",
     "architecture.zh-CN.md",
     "implementation.zh-CN.md",
 )
 REQUIRED_REUSABLE_MODULE_DOCUMENT = "adoption-guide.zh-CN.md"
+REQUIRED_GOVERNANCE_DOCUMENTS = ("SECURITY.zh-CN.md", "DATA-GOVERNANCE.zh-CN.md")
 
 
 def test_required_document_layers_exist_and_are_discoverable() -> None:
@@ -18,6 +19,9 @@ def test_required_document_layers_exist_and_are_discoverable() -> None:
     for name in (*REQUIRED_PROGRAM_DOCUMENTS, REQUIRED_REUSABLE_MODULE_DOCUMENT):
         assert (ROOT / "docs" / name).is_file()
         assert f"(docs/{name})" in chinese_readme
+    for name in REQUIRED_GOVERNANCE_DOCUMENTS:
+        assert (ROOT / name).is_file()
+        assert f"({name})" in chinese_readme
 
 
 def test_relative_markdown_links_resolve() -> None:
@@ -39,3 +43,19 @@ def test_python_documentation_blocks_are_syntax_valid() -> None:
         blocks = block_pattern.findall(markdown.read_text(encoding="utf-8"))
         for index, block in enumerate(blocks, start=1):
             compile(block, f"{markdown}:python-block-{index}", "exec")
+
+
+def test_public_docs_do_not_contain_operational_identifiers() -> None:
+    patterns = {
+        "email address": re.compile(
+            r"(?i)[a-z0-9._%+-]+@(?!example\.(?:com|org|net))[a-z0-9.-]+\.[a-z]{2,}"
+        ),
+        "IPv4 address": re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"),
+        "deployment path": re.compile(r"/(?:home|root|opt|var/lib)/[^\s`]+"),
+    }
+    for markdown in MARKDOWN_FILES:
+        content = markdown.read_text(encoding="utf-8")
+        for label, pattern in patterns.items():
+            assert pattern.search(content) is None, (
+                f"{label} leaked in {markdown.relative_to(ROOT)}"
+            )

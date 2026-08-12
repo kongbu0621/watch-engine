@@ -51,6 +51,10 @@ python -m mypy src
 
 下游生产环境应固定明确版本，不直接跟随 `main`。
 
+在维护者完成 PyPI 名称保留并发布可验证产物前，不要执行无来源约束的
+`pip install watch-engine`。应使用受信任仓库的精确 Tag/Commit，并在生产构建中校验提交或制品摘要，
+避免同名包抢注造成 dependency-confusion 风险。
+
 ## 4. 接入职责表
 
 | 能力 | watch-engine | 下游程序 |
@@ -80,14 +84,9 @@ from watch_engine import Observation
 
 class InventoryObserver:
     def observe(self) -> Observation:
-        try:
-            evidence = fetch_and_parse_inventory()
-        except TemporaryAccessError as exc:
-            return Observation.failed(
-                observed_at=datetime.now(timezone.utc),
-                error=str(exc),
-                evidence={"error_type": type(exc).__name__},
-            )
+        # 访问/解析异常直接抛给 Runtime，由引擎按有界策略重试；重试耗尽后
+        # 只持久化固定内建异常类别，不保存异常消息或下游自定义类名。
+        evidence = fetch_and_parse_inventory()
 
         if evidence.is_incomplete:
             return Observation.degraded(
@@ -170,6 +169,8 @@ Policy 可以决定首次有效 Observation 是否产生事件。建议默认不
 ## 7. 第三步：实现幂等 EventSink
 
 EventSink 在数据库事务提交后执行。投递是 at-least-once，同一 `event_id` 可能被调用多次。
+成功必须返回 `None`，失败必须抛出异常；返回 `False`、响应对象或其他非 `None` 值会被引擎按失败
+处理，不能作为隐式成功/失败信号。
 
 ```python
 class NotificationSink:
@@ -200,7 +201,7 @@ from watch_engine import (
 )
 
 definition = WatchDefinition(
-    watch_id="apple-cn-refurb-mac-studio",
+    watch_id="inventory-cn-target",
     trigger=IntervalTrigger(90, 150),
     observer=InventoryObserver(),
     transition_policy=InventoryTransitions(),
@@ -252,10 +253,11 @@ dispatcher = OutboxDispatcher(store, NotificationSink(client))
 delivery_results = dispatcher.dispatch_ready()
 ```
 
-Runtime 与 Dispatcher 可以由同一进程的两个循环驱动，也可以由同一主机上的独立进程驱动。具体
-方式由下游负责，但必须遵守 v0.1 单节点边界，并保证一个 SQLite 数据库同一时刻只有一个活跃的
-Dispatcher。不要用多个 Dispatcher 进程并行提高吞吐；新 Dispatcher 启动时会把遗留
-`DELIVERING` 视为上一个投递进程已经中断。
+v0.1 的部署基线是：一个 SQLite 数据库只由一个本机监控进程拥有，Runtime 与 Dispatcher 都在
+该进程内运行。增加监控目标时，优先在同一进程内串行执行，不通过增加进程提高吞吐。只有未来出现
+大量独立目标或分布式部署等明确需求时，才重新设计租约、并发和存储架构。新进程只能在旧进程完全
+退出后启动，因为新 Dispatcher 会把遗留 `DELIVERING` 视为上一个投递进程已经中断。
+`attempts` 只是已完成投递次数，不是唯一 claim token；不得用它把两个重叠 Dispatcher 误认为安全。
 
 `WatchRunner.serve()` 只在两次运行之间检查 stop event。若它正在等待长 Interval/Cron，设置 stop
 不会立即唤醒等待；要求及时停机时，下游应取消外层 asyncio Task 或实现自己的信号/超时编排，并
@@ -295,6 +297,7 @@ your-monitor/
 - 访问/解析失败不会伪造成领域状态；
 - 时间戳包含时区；
 - state 与 evidence 不包含秘密。
+- 不修改或跨线程共享已经返回的 Observation 嵌套 JSON；模型会隔离原始输入，但嵌套容器不是深只读。
 
 ### TransitionPolicy
 
@@ -307,6 +310,7 @@ your-monitor/
 ### EventSink
 
 - 相同 `event_id` 重复调用不会产生重复外部副作用；
+- 成功返回 `None`，失败抛出异常，非 `None` 返回值不会被静默确认；
 - 暂时失败可安全重试；
 - 永久失败可诊断；
 - 发送内容符合 Watch Event v1。
@@ -322,16 +326,13 @@ your-monitor/
 5. Sink 失败后重试；
 6. 重启后继续投递；
 7. 同一事件重复投递被 Sink 幂等处理。
+8. `get_watch_status()` 能在成功和错误运行后返回 typed 诊断，业务日志不得直接输出含调用方字段的
+   整个诊断对象。
 
 ## 13. 跨工程事件消费
 
-当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.0` 的 wheel
-没有携带仓库根目录下的 Schema，因此不能假设安装 Python 包后存在本地
-`schemas/watch-event-v1.json`。应从 Release Tag 获取并随消费者固定保存：
-
-```text
-https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-event-v1.json
-```
+当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.1` 起可通过
+`load_watch_event_schema()` 读取 wheel 内置副本，也可从同版本 Release Tag 获取并随消费者固定保存。
 
 验证，而不是：
 
@@ -355,7 +356,34 @@ https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-e
 
 `watch-engine` 不负责替下游加载或保管秘密。
 
-## 15. 版本升级
+## 15. 数据保留与删除
+
+采用者必须根据业务用途确定保留期限，并由自己的调度或运维系统定期执行清理。引擎不会静默删除
+数据，也不会替业务选择法律保留期限。
+
+```python
+from datetime import UTC, datetime, timedelta
+
+cutoff = datetime.now(UTC) - timedelta(days=30)
+result = store.purge_before(cutoff)
+print(
+    {
+        "observations_deleted": result.observations_deleted,
+        "events_deleted": result.events_deleted,
+        "outbox_rows_deleted": result.outbox_rows_deleted,
+        "delivery_attempts_deleted": result.delivery_attempts_deleted,
+    }
+)
+```
+
+`purge_before()` 只清理 `DELIVERED/DEAD` 事件历史和非 Authority Observation；`PENDING`、
+`RETRY`、`DELIVERING` 以及当前 Authority 不会被删除。可通过 `watch_id=` 只清理一个 Watch。
+
+彻底删除 Watch 前先停止对应 Runner 和 Dispatcher。`delete_watch()` 默认拒绝尚有未投递事件的
+Watch；只有明确接受事件丢失时才使用 `allow_undelivered=True`。停止所有数据库所有者后，可以调用
+`compact_storage()` 做 WAL checkpoint 与 `VACUUM`。数据库外的备份、快照和日志必须单独清理。
+
+## 16. 版本升级
 
 下游应：
 
@@ -366,6 +394,10 @@ https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-e
 5. 检查 Public API 与 Watch Event Schema；
 6. 备份持久数据库后再执行涉及 Schema migration 的升级。
 
+watch-engine SQLite 文件必须保持引擎独占。不要在其中添加业务表、View、Trigger 或自定义 Index；
+这些对象会使下次启动的只读身份校验失败。已有表或 Index 的 DDL 语义变化（包括排序、Collation、
+`AUTOINCREMENT` 或约束集合）同样会被拒绝；业务数据和个人信息应放在采用方自己的独立存储中。
+
 Semantic Versioning 解释：
 
 - Patch：兼容性修复；
@@ -374,7 +406,7 @@ Semantic Versioning 解释：
 
 事件 Schema 独立带版本，不能只依据 Python 包版本推断消息格式。
 
-## 16. 采用完成标准
+## 17. 采用完成标准
 
 一个下游只有满足以下条件，才算真正完成采用：
 
@@ -388,7 +420,7 @@ Semantic Versioning 解释：
 - 部署配置、秘密和进程监督由下游管理；
 - 真实运行产生的通用缺口与领域需求被分别记录。
 
-## 17. 反馈通用缺口
+## 18. 反馈通用缺口
 
 发现问题时先判断：
 
@@ -401,7 +433,7 @@ Semantic Versioning 解释：
 
 应留在下游：
 
-- Apple 页面结构、SKU、价格和库存语义；
+- 特定厂商页面结构、产品编号、价格和库存语义；
 - 某个服务的认证与速率限制；
 - 微信、邮件等通知格式；
 - 下游进程部署策略；

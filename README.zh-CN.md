@@ -19,7 +19,8 @@
   不访问网络或外部服务，不执行阻塞 I/O，不发送通知，不修改 SQLite 数据库之外的状态，也不产生
   其他不可逆副作用。
 - `WatchEvent` 是由引擎管理、持久保存的 v1 事件信封。
-- `EventSink` 负责投递事件，并且必须将 `event_id` 作为重试时的幂等键。
+- `EventSink` 成功返回 `None`、失败抛出异常，并且必须将 `event_id` 作为重试时的幂等键；其他
+  返回值按失败处理。
 
 这一区分至关重要：观测失败表示引擎无法可靠地观测目标，并不表示目标发生了状态变化。无论经历
 多少次非 `VALID` Observation，下一次 `VALID` Observation 始终与最后一个 authoritative
@@ -66,7 +67,7 @@ class HealthTransitions:
         ]
 
 
-class JsonLineSink:
+class SummarySink:
     def __init__(self):
         self.seen = set()
 
@@ -74,7 +75,8 @@ class JsonLineSink:
         if event.event_id in self.seen:
             return
         self.seen.add(event.event_id)
-        print(event.to_dict())
+        # 不记录 subject/payload，避免调用方放入的敏感数据进入日志。
+        print({"event_id": event.event_id, "event_type": event.event_type})
 
 
 store = SQLiteStore("watch-engine.db")
@@ -89,7 +91,7 @@ definition = WatchDefinition(
 result = WatchRuntime(store).run_once(definition)
 
 # Deliver all currently due events. Run this repeatedly in a worker/process loop.
-delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
+delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
 如需调度执行，`await WatchRunner(runtime).run_next(definition)` 会等待一次 Trigger 并执行一次
@@ -98,8 +100,10 @@ delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
 
 ## 持久化与投递
 
-`SQLiteStore` 会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份 Observation、
-authoritative Observation、事件、Outbox 行以及每一次投递尝试。
+`SQLiteStore` 要求使用文件数据库，并会自动初始化版本 1 schema。它保存 Watch 运行元数据、每一份
+Observation、authoritative Observation、事件、Outbox 行以及每一次投递尝试。
+在 POSIX 系统上，数据库、WAL 和 SHM 文件会被强制设为仅所有者可读写（`0600`），并拒绝
+符号链接或具有多个硬链接的数据库路径；部署时还应将父目录设为仅所有者可访问（`0700`）。
 
 持久化过程刻意划分为两个事务边界：
 
@@ -122,14 +126,39 @@ I/O、修改 SQLite 之外的状态或产生无法回滚的副作用。这些操
 在 EventSink 接受事件之后、SQLite 记录成功之前退出；下一个进程会再次发送具有同一
 `event_id` 的已存储事件。EventSink 必须按 `event_id` 去重。失败的投递尝试使用可配置且有上限的
 指数退避，并能在重启后继续。重试耗尽的事件会以 `DEAD` 状态保留，供诊断使用。
+v0.1 的 SQLite 后端只支持一个本机拥有进程和一个活跃 Dispatcher。确认时会校验已完成尝试次数，
+但它不是租约或唯一 claim token；旧 Dispatcher 与替代 Dispatcher 不得重叠运行。
 
 Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策略重试。尝试次数耗尽后，运行时会
-持久化一份 `FAILED` Observation，其中包含异常类型和尝试次数。若 Observer 主动返回
+持久化一份 `FAILED` Observation，其中只包含固定内建异常类别和尝试次数；异常消息与下游自定义
+异常类名会被主动丢弃。若 Observer 主动返回
 `DEGRADED` 或 `FAILED`，说明它已经对证据完成分类，因此该结果会立即持久化，不会被隐式重试。
 
 所有时间戳都包含时区信息并统一为 UTC。JSON 采用确定性的键排序方式存储。跨项目集成契约是
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json)；使用方应依据该契约，而不是导入
 内部数据库模型。
+
+每个 JSON 字段编码后上限为 1 MiB，标识符/事件元数据标量和错误字段上限为 2,048 字符。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
+旧的终态（`DELIVERED`/`DEAD`）事件历史和非 Authority 观测，`delete_watch()` 默认拒绝删除仍有
+未投递事件的 Watch，只有实际布尔值 `True` 才能覆盖该保护；`compact_storage()` 应在其他数据库
+使用者停止后执行 checkpoint 和 vacuum。
+执行破坏性 Watch 删除或压缩前，必须先停止 Runner 与 Dispatcher。
+
+SQLite 文件是引擎独占的存储边界，不是与业务共用的数据库。重新打开时会在改动文件前校验 v1
+全部用户定义 Schema 对象、列、Foreign Key、状态 CHECK、Outbox 事件唯一约束以及规范化后的完整
+建表/建索引 SQL。规范化按 SQL Token 处理：忽略纯格式差异，但保留 Token 边界和引号内字面量；
+校验包括索引排序与 Collation、`AUTOINCREMENT` 和完整表约束集合。不得向该文件增加采用方的表、
+View、Trigger 或 Index；业务数据和个人信息必须使用独立存储。单次投递领取上限为 500 个事件，
+默认值为 100。
+
+`get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
+模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
+不是深只读对象。应把它们当作快照，不要修改或跨并发任务共享；对这些内存容器的修改不会回写已经
+持久化的 Observation、Authority 或 Event。
+
+生产使用前请阅读[安全策略](SECURITY.zh-CN.md)与[数据治理策略](DATA-GOVERNANCE.zh-CN.md)。任何引擎字段都不得
+包含凭据、个人信息或其他敏感数据。
+库自身日志不会输出调用方可控的 Watch/Event 标识或载荷字段。
 
 ## 设计与采用文档
 
@@ -145,6 +174,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m pip_audit . --progress-spinner=off
 ```
 
 测试套件完全在本地运行，不需要网络或第三方服务。
@@ -153,6 +183,9 @@ python -m mypy src
 
 运行时有意限定为单节点，并在 Observer/EventSink 边界采用同步调用。SQLite 负责协调本地事务，
 但它不是分布式锁。
+
+当前部署基线是一个 SQLite 数据库只运行一个本机监控进程，Runner 与 Dispatcher 都由该进程拥有；
+增加监控目标时优先在同一进程内串行执行，不盲目增加进程。
 
 同一 `watch_id` 的多个运行可以在 Observer 阶段重叠。Authority 提升由 SQLite 串行化，并按
 `Observation.observed_at` 排序。时间戳早于或等于当前 Authority 的 `VALID` Observation 只会

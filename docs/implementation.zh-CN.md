@@ -68,6 +68,8 @@ watch-engine/
 - `WatchDefinition`
 - `WatchRuntime`
 - `WatchRunner`
+- `WatchStatus`
+- `RunStatus`
 - `RunResult`
 
 ### 4.2 扩展接口
@@ -96,6 +98,8 @@ watch-engine/
 - `OutboxDispatcher`
 
 新增公开能力时，必须先判断它属于公共契约还是内部实现；公开导出后必须纳入 Semantic Versioning 和兼容性测试。
+公开 dataclass 不只依赖类型注解：构造时会校验枚举、字符串、布尔值、非负计数、结果容器和配置
+对象类型，使直接构造与引擎内部产生的值遵守同一运行时不变量。
 
 ## 5. 核心模型实现
 
@@ -116,7 +120,9 @@ watch-engine/
 落地约束：
 
 - 构造时通过 `require_aware` 拒绝无时区时间；
-- `state` 与 `evidence` 通过 `validate_json` 校验；
+- `state` 与 `evidence` 通过严格 JSON 校验并复制，后续修改调用方原对象不会改变模型；frozen 只
+  禁止字段重新绑定，模型内部的 `dict/list` 仍是普通可变容器，因此模型属于脱离输入的内存快照，
+  不宣称深只读；
 - 提供 `valid()`、`degraded()`、`failed()` 工厂方法；
 - 只有 `VALID` 能进入 Authority 提升流程。
 
@@ -148,7 +154,8 @@ watch-engine/
 
 `min(base_delay × multiplier^(failure_number-1), maximum_delay)`
 
-参数在 dataclass 初始化时校验，拒绝无效次数、非正延迟和小于 1 的倍数。
+参数在 dataclass 初始化时校验，拒绝无效次数、非有限数、非正延迟和小于 1 的倍数；极大失败
+序号导致指数浮点溢出时直接返回最大延迟，不让配置边界击穿 Dispatcher。
 
 ### 5.4 DeliveryConfig
 
@@ -162,7 +169,10 @@ watch-engine/
 | 倍数 | 2.0 |
 | `batch_size` | 100 |
 
-Observer 重试与 Event 投递重试是两套独立配置，不得混用。
+`batch_size` 与 Store 的 `claim_due(limit)` 均限制在 1 到 500。领取 SQL 还需要两个时间参数，500
+为 [SQLite 历史默认 999 个绑定变量限制](https://www.sqlite.org/limits.html)保留余量，同时避免形成
+不受控内存批次。Dispatcher 会继续在后续 `dispatch_ready()` 调用中领取剩余到期事件。Observer
+重试与 Event 投递重试是两套独立配置，不得混用。
 
 ## 6. Runtime 实现
 
@@ -178,7 +188,7 @@ Observer 重试与 Event 投递重试是两套独立配置，不得混用。
 - TransitionPolicy；
 - Observer RetryPolicy。
 
-初始化时拒绝空 `watch_id`。
+初始化时拒绝空或超过 2,048 字符的 `watch_id`。
 
 ### 6.2 run_once 执行步骤
 
@@ -192,17 +202,20 @@ Observer 重试与 Event 投递重试是两套独立配置，不得混用。
 2. `_observe()`：
    - 同步调用 `Observer.observe()`；
    - 异常时按 Observer RetryPolicy 调用可注入的 `sleep`；
-   - 重试耗尽后创建 `FAILED` Observation，证据记录异常类型和尝试次数。
+   - 重试耗尽后创建 `FAILED` Observation，证据记录异常类型和尝试次数；
+   - 返回值必须是 `Observation`，错误类型不得穿过存储边界。
 3. `SQLiteStore.record_observation()`：
    - 先持久保存证据；
    - 只有 `VALID` 继续 Authority 提升。
-4. 持久化或提升异常：
+4. Observer 契约、重试 sleep、持久化或提升异常：
    - 调用 `mark_run_error()`；
    - 记录异常日志；
    - 重新抛出，交给下游进程处理。
 5. 返回 `RunResult(observation, events)`。
 
-Clock 和 sleep 均可注入，便于测试时间与重试行为。
+Clock 和 sleep 均可注入，便于测试时间与重试行为。开始标记完成后的内部异常都进入同一错误
+收口；若记录错误时 Clock 再次失败，使用已验证的开始时间，避免 Watch 永久停在 `RUNNING`。若
+`mark_run_error()` 本身失败，仍重新抛出最初异常，不用二次故障覆盖根因。
 
 ### 6.3 WatchRunner
 
@@ -257,6 +270,7 @@ stop event 不会中断一个已经开始的 `Trigger.wait_next()`；长 Interva
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
+PRAGMA secure_delete = ON;
 ```
 
 Python 连接参数：
@@ -265,7 +279,23 @@ Python 连接参数：
 - `timeout=5.0`；
 - `row_factory=sqlite3.Row`。
 
-v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代码支持版本，初始化直接失败，不进行静默迁移。
+连接会验证 WAL 与 `secure_delete` 的实际返回值，不支持时 fail-fast，而不是假定 PRAGMA 已生效。
+v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
+初始化直接失败，不进行静默迁移或任意选择第一行。建表前先检查已有数据库：存在用户表但没有
+`schema_meta` 时拒绝接管；即使碰巧存在版本值为 `1` 的同名表，也必须完整匹配 v1 用户定义对象
+集合、列名、类型、非空、默认值、主键、Foreign Key、状态 CHECK 以及 Outbox `event_id` 唯一约束，
+并对所有用户表与显式 Index 比较规范化后的 `sqlite_master.sql`，才认定为本模块数据库。期望值
+由唯一的 `_SCHEMA_SQL` 在内存 SQLite 中生成并缓存，避免校验规则与建库 DDL 双份漂移；规范化仅
+忽略关键字大小写、注释和引号外空白，同时把标识/关键字、引号内容、操作符与标点拆成独立 Token，
+保留 Token 边界和引号内字面量。该设计既容忍格式差异，也避免 `status IN (...)` 与
+`statusin(...)` 在直接删空白后碰撞。由此可以识别同列名但使用 `DESC`/不同 Collation 的 Index、
+移除 `AUTOINCREMENT`、增加额外约束或更改 CHECK 字面量。识别使用只读连接，任一不兼容时，在
+执行写型 PRAGMA、chmod 或任何 watch-engine DDL 前失败。该 SQLite 文件必须由引擎独占，不允许
+混放采用方对象或业务数据；空 SQLite 文件没有业务对象，可作为显式初始化目标。
+
+空库初始化使用一个显式 `BEGIN IMMEDIATE ... COMMIT` 事务创建完整 v1 Schema 和版本行；任一
+建表/建索引动作失败时由连接事务回滚，不能留下会阻断下次启动的半初始化对象。已有且验证通过的
+v1 数据库直接复用，不重复运行 `CREATE IF NOT EXISTS`。
 
 ### 8.2 表结构
 
@@ -289,6 +319,8 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 
 `watches.run_status`、开始/结束时间和 `last_error` 是最后写入的诊断快照。允许 Observer 重叠时，
 它们不构成准确的活跃运行计数，也不得被下游当作调度锁或 Authority 来源。
+采用方通过 `SQLiteStore.get_watch_status(watch_id)` 获得 typed `WatchStatus`；不存在的 Watch 返回
+`None`。其中 `observation_count` 是已经持久化的 Observation 数量，不是当前活跃运行数。
 
 ### 8.3 第一事务：保存证据
 
@@ -305,21 +337,49 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 
 `_promote_valid_observation()` 使用独立 `BEGIN IMMEDIATE`：
 
-1. 读取当前 Authority；
-2. 若 `current.observed_at <= previous.observed_at`：
+1. 从已持久化的 Observation 行重新构造 Current，并保存其规范 `state_json`；
+2. 读取当前 Authority；
+3. 若 `current.observed_at <= previous.observed_at`：
    - 提交空变更并返回；
    - 保留已保存 Observation；
    - 不调用 Policy，不生成 Event。
-3. 在事务内调用 `TransitionPolicy.evaluate(previous, current)`；
-4. 为每个 EventDraft 插入 `events` 和 `outbox`；
-5. UPSERT `authoritative_states`；
-6. 一次提交。
+4. 在事务内调用 `TransitionPolicy.evaluate(previous, current)`；
+   - 返回值必须是 `EventDraft` 的 `Sequence`；先复制成 tuple 并逐项验证，错误返回不得部分建 Event；
+5. 为每个 EventDraft 插入 `events` 和 `outbox`；
+6. 使用调用 Policy 前保存的规范状态 UPSERT `authoritative_states`；
+7. 一次提交。
+
+模型的嵌套 JSON 会在构造时脱离调用方对象；即使错误 Policy 仍尝试修改收到的 Current，Authority
+投影也只使用事务内重读且预先保存的持久状态，不会与 Observation 证据分叉。
 
 任一步异常都会回滚第二事务，因此不会出现：
 
 - Authority 已更新但 Event 丢失；
 - Event 已创建但 Outbox 丢失；
 - Policy 失败后 Authority 仍被提升。
+
+### 8.5 数据生命周期 API
+
+`SQLiteStore` 只接受非空 `str` 或 `Path` 文件数据库路径；错误类型、空字符串或 `:memory:` 会立即
+失败。构造函数也会在创建数据库文件前检查 ID 工厂与时钟是否可调用。这是因为存储层的
+每个公开操作都会建立独立连接，SQLite 的普通内存数据库无法在这些连接之间共享 Schema 和状态。
+
+`purge_before()`、`delete_watch()` 返回不含业务载荷和调用方标识符的 `PurgeResult`：
+
+| 字段 | 含义 |
+|---|---|
+| `observations_deleted` | 删除的非 Authority Observation 行数 |
+| `events_deleted` | 删除的 Event 行数 |
+| `delivery_attempts_deleted` | 删除的投递尝试行数 |
+| `watches_deleted` | 删除的 Watch 行数；批量按时间清理时始终为 `0` |
+| `outbox_rows_deleted` | 删除的 Outbox 行数；作为新增字段追加在末尾以保持旧位置参数语义 |
+
+`purge_before()` 先把待删事件写入事务内临时目标表，再用子查询删除关联行，避免事件数量较大时
+触发 SQLite 绑定参数上限。它只删除截止时间以前的 `DELIVERED/DEAD` 事件链，以及不再被 Authority 引用的
+旧 Observation。`PENDING/RETRY/DELIVERING` 事件与当前 Authority 必须保留。`delete_watch()` 默认
+拒绝删除仍有未投递事件的 Watch；显式传入 `allow_undelivered=True` 才允许覆盖此保护。两个操作
+均在单个 `BEGIN IMMEDIATE` 事务中完成，任一 SQL 失败时整体回滚。
+`allow_undelivered` 必须是实际 `bool`；字符串 `"false"`、整数 `1` 等真值不得绕过破坏性保护。
 
 ## 9. Outbox 投递实现
 
@@ -348,14 +408,25 @@ stateDiagram-v2
 1. 当前 Dispatcher 实例首次运行时调用 `recover_in_flight()`，在取得数据库唯一投递所有权后恢复
    上个进程遗留的 `DELIVERING`；
 2. 按 `batch_size` 调用 `claim_due()`；
-3. 对每个 ClaimedEvent 同步调用 `EventSink.deliver()`；
+3. 对每个 ClaimedEvent 同步调用 `EventSink.deliver()`；成功必须返回 `None`，异常或任意非 `None`
+   返回值均视为失败；
 4. 成功：`record_delivery_success()`，写入成功尝试并设为 `DELIVERED`；
 5. 失败：
    - 计算 `failure_number = attempts + 1`；
    - 未耗尽则设置 `RETRY` 和 `next_attempt_at`；
    - 耗尽则设置 `DEAD`；
    - 保存错误和失败尝试；
-6. 返回 `DeliveryResult` 集合。
+6. 成功时间、失败时间和重试起点使用各次 Sink 调用的实际完成时间，而不是整批领取时间；
+7. 返回 `DeliveryResult` 集合。
+
+成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、已完成尝试计数 `attempts` 和
+`DELIVERING` 状态；事件错配、尝试计数错配或已经不活跃的 claim 不得更新 Outbox，也不得生成
+投递审计行。`attempts` 不是唯一 claim token：在违反单所有者基线、让旧 Dispatcher 与恢复后的
+新 Dispatcher 重叠运行时，重新领取且尚未完成的新 claim 可能具有相同计数，v0.1 不承诺区分它们。
+若领取提交后发生 Clock、行恢复、SQLite 确认异常或进程级中断，当前调用不掩盖异常，但会在
+`finally` 中清除本实例的恢复标记；
+同一 Dispatcher 下一次调用会先恢复遗留 `DELIVERING`，不要求重启进程或重建对象。Sink 可能已
+接受该事件，因此恢复投递仍依赖 `event_id` 幂等。
 
 ### 9.3 一致性语义
 
@@ -364,8 +435,10 @@ stateDiagram-v2
 落地要求：生产 EventSink 必须在外部服务或自身持久存储中按 `event_id` 幂等。进程内集合只能用于示例和测试。
 
 v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
-`DELIVERING`。因此同一 SQLite 数据库只能有一个活跃 Dispatcher；进程监督器必须保证旧实例退出后
-再启动替代实例。
+`DELIVERING`。因此同一 SQLite 数据库只能有一个本机监控进程，Runner 与 Dispatcher 均由该进程
+持有；进程监督器必须保证旧实例退出后再启动替代实例。增加目标时使用同一进程内串行调度。
+所有可选时间与投递配置只把 `None` 解释为“未提供”；`0`、空容器等错误类型不会静默降级为当前
+时间或默认配置。
 
 ## 10. JSON 与时间实现
 
@@ -373,9 +446,15 @@ v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_fli
 
 `src/watch_engine/_json.py` 负责：
 
-- 拒绝不可 JSON 序列化的 state/evidence/subject/payload；
-- 确定性编码，避免键顺序导致不稳定持久化；
-- 从 SQLite 文本恢复 JSON 值。
+- 递归拒绝 tuple、非字符串对象 key、循环引用及其他会被 `json.dumps()` 静默改写的非 JSON 类型；
+- 拒绝 `NaN` 与正负无穷；
+- 最多允许 100 层容器嵌套，避免无环超深输入触发 Python 递归栈异常；
+- 以 UTF-8 编码后的完整字节数执行 1 MiB 上限；
+- `watch_id/event_id/observation_id/event_type/severity/dedupe_key` 等标量上限为 2,048 字符；
+- 使用稳定 key 排序和紧凑分隔符持久化；
+- 构造领域模型时通过规范编解码复制嵌套数据，隔离调用方原始可变引用；模型暴露的嵌套容器不是
+  深只读，但对查询快照的修改不会穿透回 SQLite；
+- 从 SQLite 文本恢复时再次执行大小、深度和形状校验，损坏数据不会被静默接受。
 
 ### 10.2 时间
 
@@ -438,13 +517,15 @@ SQLite 文件当作分布式协调数据库。
 
 ### 13.2 Python 日志
 
-Runtime、Storage 和 Dispatcher 使用标准 `logging`，附带 `watch_id`、`event_id`、尝试次数等上下文。
+Runtime、Storage 和 Dispatcher 使用标准 `logging`，只附带异常类型、尝试次数、时间戳等不含
+调用方业务内容的上下文。库日志不输出 `watch_id`、`event_id`、Observation/Event 内容或异常消息；
+需要业务关联时由下游在完成数据分类和脱敏后自行记录。
 
 引擎不配置 Handler、日志文件或采集服务，这些由下游部署决定。
 
 ### 13.3 DEAD 处理
 
-v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
+v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态，并按保留策略调用 `purge_before()`；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
 
 ## 14. 测试落地方案
 
@@ -469,7 +550,18 @@ v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动�
 9. Trigger 参数、时区和手动信号；
 10. Watch Event v1 Schema；
 11. Public API 可导入；
-12. SQLite Schema 版本不匹配时 fail-fast。
+12. SQLite Schema 版本不匹配或 `schema_meta` 歧义时 fail-fast；
+13. 严格 JSON 形状、大小、深度与防御性复制；
+14. Outbox 确认必须与 claim 身份和尝试次数一致；
+15. 超大批量清理不依赖 SQLite 可变长度参数列表；
+16. 已有 SQLite 的身份、版本、完整对象集合、列、Foreign Key 与关键 CHECK/UNIQUE 约束先只读验证，
+    拒绝时 Schema、journal mode 和权限保持不变；
+17. 确认失败或进程级中断后，同一 Dispatcher 下次调用恢复遗留 claim；
+18. Sink 非 `None` 返回值按失败处理，投递完成时间与重试起点准确；
+19. Observer 返回值、sleep/clock 二次失败不会让运行状态静默卡住或覆盖根因；
+20. WAL checkpoint 繁忙时压缩明确失败，不把未完成 checkpoint 报成成功。
+21. `get_watch_status()` 对不存在、成功、失败三种 Watch 返回稳定 typed 诊断，且不暴露内部表查询。
+22. 首次 Schema 创建中途失败时所有用户对象回滚，随后可重新初始化完整 v1 Schema。
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
@@ -511,8 +603,8 @@ CI 还必须：
 4. 离开仓库工作目录后导入 `watch_engine`；
 5. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
 
-这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试，也不声称
-v0.1.0 wheel 包含仓库级 Event Schema。
+这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试。v0.1.1
+还必须验证 `load_watch_event_schema()` 能从安装后的 wheel 读取与仓库根 Schema 相同的内容。
 
 ## 16. 本地验证命令
 
@@ -540,15 +632,14 @@ python -m build
   `site-packages` 导入：通过；
 - wheel 内容核对：不包含仓库级 `schemas/watch-event-v1.json`。
 
-最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。跨工程消费者必须从固定 Tag URL 获取并
-固定保存 Schema；若未来决定把 Schema 作为 package resource 分发，必须增加 wheel 内容测试并以
-新版本发布，不能悄悄改变已经存在的 v0.1.0 产物。
+最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。v0.1.1 增加 package resource 与一致性
+测试；这不会改变已经冻结的 v0.1.0 产物。
 
 ## 17. 版本与发布方案
 
 ### 17.1 当前版本来源
 
-`pyproject.toml` 中的 `project.version = "0.1.0"` 是 Python 包版本来源。
+`pyproject.toml` 中的 `project.version = "0.1.1"` 是下一维护版本的 Python 包版本来源。
 
 ### 17.2 已发布基线
 
@@ -564,6 +655,12 @@ python -m build
 覆盖 `v0.1.0` Tag。后续若真实采用暴露代码、打包或契约修复，应更新包版本并创建新的 Release；
 只有文档变化时，也必须明确它描述的是已发布代码还是未来目标。
 
+### 17.3 包索引发布安全
+
+在 PyPI 名称完成所有权验证和首个可核验版本发布前，公开采用指南只允许从受信任 Git 仓库固定
+Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建干净 sdist/wheel、校验内容与摘要，
+并先验证包名所有权；没有这些条件不得引导使用者执行无来源约束的 `pip install watch-engine`。
+
 ## 18. 需求—架构—实现追踪
 
 | 需求 | 架构对象 | 代码落点 | 状态 |
@@ -578,9 +675,10 @@ python -m build
 | FR-08 事件身份 | Event Model | `EventDraft / WatchEvent / _insert_events` | 已实现 |
 | FR-09 可靠投递 | Outbox / Dispatcher | `outbox`、`delivery_attempts`、`delivery.py` | 已实现 |
 | FR-10 跨工程契约 | Event Schema | `schemas/watch-event-v1.json` | 已实现 |
-| 独立采用验证 | 下游工程 | `apple-refurb-monitor` | 待完成 |
+| NFR-03 typed 诊断 | Persistence Public API | `WatchStatus`、`get_watch_status` | 已实现并测试 |
+| 独立采用验证 | 匿名下游工程 | Public API + Schema | 已完成，证据在下游私有记录 |
 | wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
-| Schema wheel 分发 | 打包边界 | v0.1.0 wheel 不包含仓库级 Schema | 已知限制，使用固定 Tag URL |
+| Schema wheel 分发 | 打包边界 | v0.1.1 wheel 包含 package resource | 已实现并测试 |
 | Git Tag / Release | Release 流程 | GitHub `v0.1.0` | 已完成（2026-08-10） |
 
 “已实现”表示代码落点存在；最终完成仍以自动化测试、CI 和真实下游验证为准。
@@ -591,22 +689,15 @@ python -m build
 
 - 确认三层文档和采用指南互相链接；
 - 检查文档示例与 Public API；
-- 确认 PR 仅修改正式文档和仓库维护指引，不修改 Runtime、Schema 或 Public API。
+- 确认需求、架构、实现、采用指南和代码契约同步更新。
 
-### P1：首个真实采用验证
+### P1：独立采用验证
 
-在 `apple-refurb-monitor` 中：
-
-- 实现 Apple Observer；
-- 实现库存 TransitionPolicy；
-- 实现指向通知边界的 EventSink；
-- 以固定版本安装 `watch-engine`；
-- 验证失败证据、Authority、Event、Outbox、重试与重启；
-- 将通用缺口与 Apple 领域需求分开记录。
+一个匿名独立下游已实现领域 Observer、TransitionPolicy 与 EventSink，并验证固定版本安装、失败证据、Authority、Event、Outbox、重试与重启。业务细节和部署证据不进入公开仓库。
 
 ### P2：真实采用后的维护版本
 
-真实采用验证完成后：
+维护版本发布前：
 
 - 修复确认的通用缺口；
 - 重跑 CI；
@@ -628,7 +719,28 @@ python -m build
 - 特定通知供应商；
 - 通用 daemon CLI。
 
-## 20. 文档维护规则
+## 20. v0.1.1 隐私与安全加固落地
+
+| 风险 | 代码落点 | 验收 |
+|---|---|---|
+| SQLite 权限或路径别名 | `SQLiteStore._prepare_database_file/_secure_database_files` | POSIX `0600`、symlink 与 hard-link 拒绝测试 |
+| 异常或业务标识含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 与调用方标识不进入库日志，异常消息不进入数据库 |
+| 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
+| 超大持久化字段 | `_json.MAX_JSON_BYTES`、`MAX_METADATA_CHARACTERS`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
+| 误指、约束缺失或混放对象的 SQLite | 只读身份/版本/完整 Schema 预检 | 拒绝前后对象、journal mode、权限不变 |
+| 同列名或规范化碰撞但不同 DDL 语义 | 单一 `_SCHEMA_SQL` 与 Token 级建表/索引 SQL 指纹 | DESC/Collation、AUTOINCREMENT、额外约束、字面量大小写和 `IN`/函数名碰撞反例 |
+| 首次建库中途失败 | 单事务 Schema + 版本初始化 | Authorizer 阻断 DDL 后零对象残留且可重试 |
+| 投递中断后 claim 卡死 | Dispatcher `finally` 恢复标记 | 同对象确认失败/进程级中断恢复测试 |
+| 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |
+| 错配或过期 Outbox 确认 | claim 的 event/attempt 条件更新 | 伪造 claim 不改变状态、不写审计行 |
+| Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |
+| 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
+| 无界投递批量 | `DeliveryConfig` 与 `claim_due` 的 500 条上限 | 501 在数据库操作前拒绝 |
+
+部署方应以专用非特权账号运行，数据库目录设为 `0700`，制定并调度保留策略。自动捕获的异常消息会
+被丢弃；调用方主动构造的字段无法由引擎判断是否属于个人信息，因此必须在进入 Public API 前脱敏。
+
+## 21. 文档维护规则
 
 每次程序实现变更都必须判断是否同步更新：
 

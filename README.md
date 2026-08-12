@@ -21,7 +21,8 @@ provider, or provide a distributed scheduler or web administration UI.
   fast domain decision logic: no network, external-service access, blocking I/O, notifications,
   database-external mutation, or other irreversible side effects.
 - `WatchEvent` is the engine-owned, durable v1 event envelope.
-- `EventSink` delivers events and must treat `event_id` as the retry idempotency key.
+- `EventSink` returns `None` on success or raises on failure, and must treat `event_id` as the
+  retry idempotency key. Other return values are treated as failures.
 
 This distinction is fundamental: an observation failure says the engine could not confidently
 observe the subject. It does not say the subject changed state. After any number of non-valid
@@ -68,7 +69,7 @@ class HealthTransitions:
         ]
 
 
-class JsonLineSink:
+class SummarySink:
     def __init__(self):
         self.seen = set()
 
@@ -76,7 +77,8 @@ class JsonLineSink:
         if event.event_id in self.seen:
             return
         self.seen.add(event.event_id)
-        print(event.to_dict())
+        # Deliberately avoid logging subject/payload: callers may put sensitive data there.
+        print({"event_id": event.event_id, "event_type": event.event_type})
 
 
 store = SQLiteStore("watch-engine.db")
@@ -91,7 +93,7 @@ definition = WatchDefinition(
 result = WatchRuntime(store).run_once(definition)
 
 # Deliver all currently due events. Run this repeatedly in a worker/process loop.
-delivery_results = OutboxDispatcher(store, JsonLineSink()).dispatch_ready()
+delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
 For scheduled execution, `await WatchRunner(runtime).run_next(definition)` waits for one trigger
@@ -100,8 +102,12 @@ uses ordinary cron expressions and requires an explicit timezone.
 
 ## Persistence and delivery
 
-`SQLiteStore` initializes schema version 1 automatically. It keeps watch run metadata, every
-observation, the authoritative observation, events, outbox rows, and every delivery attempt.
+`SQLiteStore` requires a file-backed database and initializes schema version 1 automatically. It
+keeps watch run metadata, every observation, the authoritative observation, events, outbox rows,
+and every delivery attempt.
+On POSIX systems the database, WAL, and SHM files are forced to owner-only mode (`0600`), and
+symbolic-link or multi-hard-link database paths are rejected. Deployments should also use an owner-only (`0700`)
+parent directory.
 
 Persistence deliberately has two transaction boundaries:
 
@@ -128,16 +134,49 @@ Delivery is intentionally **at least once**. A process can die
 after a sink accepts an event but before SQLite records success; the next process will send the
 same stored `event_id` again. Sinks must deduplicate by `event_id`. Failed attempts use configurable,
 bounded exponential backoff and survive restart. Exhausted events remain as `DEAD` diagnostics.
+The v0.1 SQLite backend supports one owning local process and one active dispatcher. Its completed
+attempt count is checked during acknowledgement but is not a lease or unique claim token; old and
+replacement dispatchers must never overlap.
 
 Observer exceptions are retried within a run using the watch's bounded retry policy. When the
-attempt budget is exhausted, the runtime persists one `FAILED` observation with the exception
-type and attempt count. An observer that deliberately returns `DEGRADED` or `FAILED` has already
+attempt budget is exhausted, the runtime persists one `FAILED` observation with a fixed built-in
+exception category and the attempt count; exception messages and downstream-defined exception
+class names are deliberately discarded. An observer that
+deliberately returns `DEGRADED` or `FAILED` has already
 classified its evidence, so that result is persisted immediately and is not retried implicitly.
 
 All timestamps are timezone-aware and normalized to UTC. JSON is stored with deterministic key
 ordering. The cross-project contract is
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json); consumers should use that contract,
 not import internal database models.
+
+Each encoded JSON field is limited to 1 MiB, scalar identifiers/event metadata to 2,048
+characters, and error fields to 2,048 characters. Retention is caller-controlled:
+`purge_before(cutoff)` deletes only old terminal (`DELIVERED`/`DEAD`) event history and
+non-authoritative observations, `delete_watch()` refuses undelivered work unless explicitly
+overridden with the actual boolean `True`, and `compact_storage()` checkpoints and vacuums after
+other owners stop. Stop the
+runner and dispatcher before a destructive watch deletion or compaction.
+
+The SQLite file is an engine-owned storage boundary, not a shared application database. On reopen,
+the store validates the exact v1 user-defined schema objects, columns, foreign keys, status checks,
+the Outbox event uniqueness constraint, and normalized table/index creation SQL before changing the
+file. Token-aware normalization preserves SQL token boundaries and quoted literals while ignoring
+format-only differences. Validation includes index ordering and collation, `AUTOINCREMENT`, and the
+complete table constraint set. Do not add adopter tables, views, triggers, or indexes to that file;
+keep business and personal data in separate storage. Delivery claims are bounded to 500 events per
+batch; the default is 100.
+
+`get_watch_status(watch_id)` returns a typed, read-only diagnostic snapshot without requiring
+callers to query internal SQLite tables. Model construction detaches caller-owned JSON and frozen
+dataclasses prevent field reassignment, but nested JSON containers exposed by a model are not
+deeply read-only. Treat them as snapshots and do not mutate or share them across concurrent code;
+such in-memory mutation never writes through to persisted Observation, Authority, or Event rows.
+
+Before production use, read the [security policy](SECURITY.md) and
+[data-governance policy](DATA-GOVERNANCE.md). Engine fields must not contain credentials,
+personal information, or other sensitive data.
+Library-generated logs omit caller-controlled watch/event identifiers and payload fields.
 
 ## Development
 
@@ -146,6 +185,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m pip_audit . --progress-spinner=off
 ```
 
 The test suite is entirely local and requires no network or third-party service.
@@ -154,6 +194,10 @@ The test suite is entirely local and requires no network or third-party service.
 
 The runtime is intentionally single-node and synchronous at the observer/sink boundary. SQLite
 coordinates local transactions; it is not a distributed lock.
+
+The current deployment baseline is one local monitor process per SQLite database. That process
+owns both runners and the dispatcher; add targets serially in the same process instead of adding
+processes without a demonstrated scaling requirement.
 
 Runs for one `watch_id` may overlap at the Observer stage. Authority promotion is serialized by
 SQLite and ordered by `Observation.observed_at`. A VALID observation whose timestamp is older

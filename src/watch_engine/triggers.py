@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from collections.abc import Awaitable, Callable
 from datetime import datetime, tzinfo
@@ -21,17 +22,41 @@ class IntervalTrigger:
         random_uniform: Callable[[float, float], float] = random.uniform,
         sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
+        if not callable(random_uniform):
+            raise TypeError("random_uniform must be callable")
+        if not callable(sleep):
+            raise TypeError("sleep must be callable")
+        for field_name, value in (
+            ("minimum_interval", minimum_interval),
+            ("maximum_interval", maximum_interval),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{field_name} must be a number")
+            try:
+                normalized = float(value)
+            except OverflowError:
+                raise ValueError(f"{field_name} must be finite") from None
+            if not math.isfinite(normalized):
+                raise ValueError(f"{field_name} must be finite")
         if minimum_interval <= 0:
             raise ValueError("minimum_interval must be positive")
         if maximum_interval < minimum_interval:
             raise ValueError("maximum_interval must be >= minimum_interval")
-        self.minimum_interval = minimum_interval
-        self.maximum_interval = maximum_interval
+        self.minimum_interval = float(minimum_interval)
+        self.maximum_interval = float(maximum_interval)
         self._random_uniform = random_uniform
         self._sleep = sleep
 
     def next_delay(self) -> float:
         delay = self._random_uniform(self.minimum_interval, self.maximum_interval)
+        if isinstance(delay, bool) or not isinstance(delay, (int, float)):
+            raise TypeError("random source must return a number")
+        try:
+            delay = float(delay)
+        except OverflowError:
+            raise ValueError("random source must return a finite number") from None
+        if not math.isfinite(delay):
+            raise ValueError("random source must return a finite number")
         if not self.minimum_interval <= delay <= self.maximum_interval:
             raise ValueError("random source returned a value outside the configured interval")
         return delay
@@ -49,6 +74,16 @@ class CronTrigger:
         clock: Callable[[], datetime] = utc_now,
         sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
+        if timezone is None:
+            raise ValueError("timezone must be explicit")
+        if not isinstance(timezone, tzinfo):
+            raise TypeError("timezone must be a tzinfo")
+        if not isinstance(expression, str):
+            raise TypeError("expression must be a string")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        if not callable(sleep):
+            raise TypeError("sleep must be callable")
         if not croniter.is_valid(expression):
             raise ValueError(f"invalid cron expression: {expression}")
         self.expression = expression

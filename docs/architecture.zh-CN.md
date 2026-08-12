@@ -50,6 +50,7 @@ flowchart TD
 - `WatchDefinition`
 - `WatchRuntime`
 - `WatchRunner`
+- `WatchStatus` / `RunStatus`
 - `Observation`
 - `EventDraft`
 - `WatchEvent`
@@ -62,6 +63,10 @@ flowchart TD
 - `schemas/watch-event-v1.json`
 
 Public API 的兼容性由 Semantic Versioning 管理。
+
+领域模型在构造时复制调用方 JSON，并冻结 dataclass 字段绑定；这隔离了调用方原对象，但不把嵌套
+`dict/list` 变成深只读容器。内存模型是快照，不是 SQLite 的 write-through view；持久化边界会重新
+构造/复制模型，Policy 或采用方对查询结果的内存修改不得改变数据库证据或 Authority。
 
 ### 4.2 Application / Runtime 层
 
@@ -104,15 +109,20 @@ Runtime 不解释领域状态，不直接投递通知。
 `OutboxDispatcher`：
 
 - 领取到期 Outbox 记录；
-- 调用 EventSink；
+- 调用 EventSink；只有返回 `None` 才是成功，异常或其他返回值均进入失败记录；
 - 记录成功或失败尝试；
 - 计算有界指数退避；
 - 重试耗尽后标记 `DEAD`。
 
-v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的 `OutboxDispatcher` 所有者。
+v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控进程；Runner 与
+`OutboxDispatcher` 均由该进程拥有，新增目标优先在进程内串行执行。
 `recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
 中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
-at-least-once 允许崩溃后的重复投递，但不把多 Dispatcher 并发协调作为 v0.1 支持能力。
+若当前实例在领取后因确认、时钟或其他内部异常/中断退出本次调用，它会重置自身恢复状态，同一对象
+下次调用也会先恢复遗留 `DELIVERING`。
+at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为 v0.1 支持能力。
+Outbox 确认会校验事件身份、当前状态与已完成尝试计数，但该计数不是租约或唯一 claim token，不能
+补偿违反单所有者约束而产生的重叠 Dispatcher。
 
 ## 5. 核心执行流程
 
@@ -209,6 +219,20 @@ Previous Authority、领域决策、Event 和 New Authority 必须依据同一�
 
 代价是 Policy 必须快速、确定且无外部 I/O。网络访问和不可逆副作用只能发生在 Observer 或 EventSink。
 
+### 7.4 数据库身份先于任何写入
+
+已有 SQLite 文件必须先通过只读连接验证 `schema_meta`、版本、完整用户定义 Schema 对象集合、
+每张表的列签名、Foreign Key、状态 CHECK、Outbox `event_id` 唯一约束和规范化后的 `sqlite_master`
+建表/建索引 SQL。后者覆盖仅看列名无法识别的索引排序、Collation、`AUTOINCREMENT` 和额外约束。
+规范化先拆分 SQL Token，只忽略关键字大小写、注释及引号外空白，保留 Token 边界和引号内字面量，
+避免把 `status IN (...)` 与 `statusin(...)` 等不同语义拼成同一指纹。只有完整匹配由同一份 v1 DDL
+生成的期望指纹后，才能收紧文件权限、启用 WAL/secure-delete 或执行 DDL。SQLite 文件由引擎独占，
+不允许混放采用方对象或业务数据；空 SQLite 文件没有已有业务对象，可作为显式初始化目标。该顺序
+防止路径误配、约束被移除或同名伪装数据库先被引擎修改、随后才失败。
+
+空库的全部表、Index 和 `schema_meta` 版本行在一个显式事务内建立。任何 DDL 中断都会回滚全部
+用户定义对象，使下一次启动仍能把它识别为空库并安全重试；已经完整验证的数据库不重复执行建表。
+
 ## 8. 并发与顺序
 
 v0.1 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠。
@@ -269,8 +293,11 @@ SQLite 不是分布式锁，因此多个主机共享数据库不属于 v0.1 支�
 
 - 不回滚 Authority 或 Event；
 - 保存 Delivery Attempt；
-- 计算下一次投递时间；
+- 以本次 Sink 调用实际完成时间计算下一次投递时间；
 - 耗尽后进入 `DEAD`，等待运维诊断。
+
+EventSink 的成功返回值必须是 `None`。`False`、响应对象等非 `None` 返回值属于契约错误，按失败
+尝试处理，避免适配器误以为返回 `False` 会阻止确认、而引擎却静默丢失事件。
 
 ### 10.5 进程重启
 
@@ -347,6 +374,9 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 - `event_id` 稳定性；
 - Watch Event v1 Schema；
 - Python 支持版本与静态检查。
+- 已有数据库的只读身份/Schema 对象、表列与约束拒绝路径；
+- 首次 Schema 创建中途失败的全量回滚与重试路径；
+- typed Watch 运行诊断查询及模型内存修改不回写持久状态。
 
 测试使用 Fake Observer、Policy 和 Sink，不连接真实网站或通知服务。
 
@@ -374,4 +404,18 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 4. 有故障语义、兼容策略和自动化测试；
 5. 不破坏 Observer、Authority、Policy、Event、Outbox 的可信链路。
 
-首个 `apple-refurb-monitor` 接入的主要目的，是验证这些边界是否真的可用，而不是让核心吸收 Apple 逻辑。
+独立下游接入的主要目的，是验证这些边界是否真的可用，而不是让核心吸收任何特定业务逻辑。公开文档只保留匿名验证结论。
+
+## 17. 隐私、安全与数据生命周期
+
+- SQLite 路径不得为符号链接或多硬链接别名；POSIX 下数据库、WAL、SHM 必须是单链接普通文件并
+  强制为 `0600`，父目录由部署方设为 `0700`；
+- 已有非空 SQLite 必须在任何 chmod、写型 PRAGMA 或 DDL 前只读验证版本、完整对象集合、表列和约束；
+- Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；库日志也不输出调用方可控的 `watch_id/event_id`；
+- 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
+- 单个 JSON 字段编码上限为 1 MiB，标识符/事件元数据标量和 error 上限为 2,048 字符；
+- `purge_before()` 只清理终态投递历史与非 Authority 观测，未投递事件与当前 Authority 始终保留；
+- `delete_watch()` 默认拒绝删除未投递事件，显式 override 才允许破坏性删除；
+- `compact_storage()` 只在其他数据库所有者停止后执行；备份、快照、SSD 映射和外部日志不在 SQLite 擦除保证内。
+
+这些措施用于降低意外泄露和无限增长风险，但引擎不是个人信息处理平台或法律合规边界。部署方仍需确定数据分类、保留期限、访问控制及适用法域。
