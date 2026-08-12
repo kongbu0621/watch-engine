@@ -9,7 +9,8 @@ tokens, cookies, private keys, personal information, precise user identifiers, c
 responses, or regulated/sensitive data in `watch_id`, Observation `state`/`evidence`/`error`, or
 WatchEvent `subject`/`payload`.
 
-The runtime redacts messages from caught exceptions and stores only their type. This protects
+The runtime redacts messages from caught exceptions and stores only a fixed built-in category. It
+does not persist downstream-controlled exception class names. This protects
 against accidental secrets embedded in exception text. Deliberately supplied model fields cannot
 be classified automatically; adopters must minimize or pseudonymize them before calling the API.
 Library-generated logs also omit caller-controlled watch/event identifiers and payload fields.

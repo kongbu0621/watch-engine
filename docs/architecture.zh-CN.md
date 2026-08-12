@@ -109,10 +109,11 @@ Runtime 不解释领域状态，不直接投递通知。
 - 计算有界指数退避；
 - 重试耗尽后标记 `DEAD`。
 
-v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的 `OutboxDispatcher` 所有者。
+v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控进程；Runner 与
+`OutboxDispatcher` 均由该进程拥有，新增目标优先在进程内串行执行。
 `recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
 中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
-at-least-once 允许崩溃后的重复投递，但不把多 Dispatcher 并发协调作为 v0.1 支持能力。
+at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为 v0.1 支持能力。
 
 ## 5. 核心执行流程
 

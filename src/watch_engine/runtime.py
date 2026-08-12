@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from watch_engine._errors import safe_exception_text
+from watch_engine._errors import safe_exception_text, safe_exception_type
 from watch_engine._time import utc_now
 from watch_engine.interfaces import Observer, TransitionPolicy, Trigger
 from watch_engine.models import Observation, RetryPolicy, RunResult
@@ -25,8 +25,12 @@ class WatchDefinition:
     observer_retry: RetryPolicy = field(default_factory=RetryPolicy)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.watch_id, str):
+            raise TypeError("watch_id must be a string")
         if not self.watch_id:
             raise ValueError("watch_id must not be empty")
+        if not isinstance(self.observer_retry, RetryPolicy):
+            raise TypeError("observer_retry must be a RetryPolicy")
 
 
 class WatchRuntime:
@@ -57,7 +61,7 @@ class WatchRuntime:
             )
             logger.error(
                 "observation persistence or promotion failed",
-                extra={"exception_type": type(exc).__name__},
+                extra={"exception_type": safe_exception_type(exc)},
             )
             raise
         return RunResult(observation=observation, events=events)
@@ -73,14 +77,14 @@ class WatchRuntime:
                     extra={
                         "attempt": attempt,
                         "max_attempts": retry.max_attempts,
-                        "exception_type": type(exc).__name__,
+                        "exception_type": safe_exception_type(exc),
                     },
                 )
                 if attempt == retry.max_attempts:
                     return Observation.failed(
                         observed_at=self._clock(),
                         error=safe_exception_text(exc),
-                        evidence={"exception_type": type(exc).__name__, "attempts": attempt},
+                        evidence={"exception_type": safe_exception_type(exc), "attempts": attempt},
                     )
                 self._sleep(retry.delay_for_failure(attempt))
         raise AssertionError("unreachable")

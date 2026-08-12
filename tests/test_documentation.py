@@ -45,9 +45,17 @@ def test_python_documentation_blocks_are_syntax_valid() -> None:
             compile(block, f"{markdown}:python-block-{index}", "exec")
 
 
-def test_public_docs_do_not_name_private_adopters_or_product_targets() -> None:
-    forbidden = ("apple-refurb-monitor", "apple-cn-refurb", "mac studio")
+def test_public_docs_do_not_contain_operational_identifiers() -> None:
+    patterns = {
+        "email address": re.compile(
+            r"(?i)[a-z0-9._%+-]+@(?!example\.(?:com|org|net))[a-z0-9.-]+\.[a-z]{2,}"
+        ),
+        "IPv4 address": re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])"),
+        "deployment path": re.compile(r"/(?:home|root|opt|var/lib)/[^\s`]+"),
+    }
     for markdown in MARKDOWN_FILES:
-        content = markdown.read_text(encoding="utf-8").lower()
-        for value in forbidden:
-            assert value not in content, f"{value!r} leaked in {markdown.relative_to(ROOT)}"
+        content = markdown.read_text(encoding="utf-8")
+        for label, pattern in patterns.items():
+            assert pattern.search(content) is None, (
+                f"{label} leaked in {markdown.relative_to(ROOT)}"
+            )

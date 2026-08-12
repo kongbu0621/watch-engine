@@ -10,7 +10,16 @@ from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import ValidationError
 
 import watch_engine
-from watch_engine import SQLiteStore, WatchEvent, load_watch_event_schema
+from watch_engine import (
+    DeliveryResult,
+    EventDraft,
+    Observation,
+    PurgeResult,
+    RunResult,
+    SQLiteStore,
+    WatchEvent,
+    load_watch_event_schema,
+)
 
 EXPECTED_PUBLIC_API = {
     "CronTrigger",
@@ -113,6 +122,108 @@ def test_naive_event_datetime_is_rejected() -> None:
         )
 
 
+def test_watch_event_rejects_unsupported_schema_version_at_runtime() -> None:
+    with pytest.raises(ValueError, match="schema_version"):
+        WatchEvent(
+            schema_version="2.0",  # type: ignore[arg-type]
+            event_id="evt-1",
+            watch_id="watch-1",
+            event_type="state.changed",
+            severity="info",
+            occurred_at=datetime(2025, 1, 1, tzinfo=UTC),
+            dedupe_key="key",
+            subject={},
+            payload={},
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        ("tuple",),
+        {1: "non-string-key"},
+    ],
+)
+def test_models_reject_values_that_json_would_silently_coerce(invalid: object) -> None:
+    with pytest.raises(TypeError):
+        Observation.valid(invalid, observed_at=datetime(2025, 1, 1, tzinfo=UTC))  # type: ignore[arg-type]
+
+
+def test_models_reject_cyclic_json_before_serialization() -> None:
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    with pytest.raises(ValueError, match="reference cycle"):
+        Observation.valid(cyclic, observed_at=datetime(2025, 1, 1, tzinfo=UTC))  # type: ignore[arg-type]
+
+
+def test_models_reject_excessively_nested_json_before_recursion_failure() -> None:
+    nested: object = "leaf"
+    for _ in range(101):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="JSON nesting exceeds 100"):
+        Observation.valid(nested, observed_at=datetime(2025, 1, 1, tzinfo=UTC))  # type: ignore[arg-type]
+
+
+def test_event_draft_requires_json_objects_for_subject_and_payload() -> None:
+    with pytest.raises(TypeError, match="JSON objects"):
+        EventDraft(
+            event_type="state.changed",
+            severity="info",
+            dedupe_key="key",
+            subject=[],  # type: ignore[arg-type]
+            payload={},
+        )
+
+
+def test_empty_wrong_typed_evidence_is_not_silently_replaced() -> None:
+    with pytest.raises(TypeError, match="evidence must be a JSON object"):
+        Observation.valid(
+            "state",
+            observed_at=datetime(2025, 1, 1, tzinfo=UTC),
+            evidence=[],  # type: ignore[arg-type]
+        )
+
+
+def test_public_result_models_reject_semantically_invalid_runtime_values() -> None:
+    observation = Observation.valid(
+        "state", observed_at=datetime(2025, 1, 1, tzinfo=UTC)
+    )
+    with pytest.raises(TypeError, match="delivered must be a bool"):
+        DeliveryResult(event_id="event", delivered="yes")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must not be negative"):
+        PurgeResult(events_deleted=-1)
+    with pytest.raises(TypeError, match="tuple of WatchEvent"):
+        RunResult(observation=observation, events=[])  # type: ignore[arg-type]
+
+
+def test_models_detach_caller_owned_json_and_event_dict_output() -> None:
+    state = {"nested": ["original"]}
+    subject = {"resource": {"id": "original"}}
+    event = WatchEvent(
+        schema_version="1.0",
+        event_id="evt-1",
+        watch_id="watch-1",
+        event_type="state.changed",
+        severity="info",
+        occurred_at=datetime(2025, 1, 1, tzinfo=UTC),
+        dedupe_key="key",
+        subject=subject,
+        payload={},
+    )
+    observation = Observation.valid(state, observed_at=datetime(2025, 1, 1, tzinfo=UTC))
+
+    state["nested"].append("caller-mutation")
+    subject["resource"]["id"] = "caller-mutation"  # type: ignore[index]
+    serialized = event.to_dict()
+    serialized_subject = serialized["subject"]
+    assert isinstance(serialized_subject, dict)
+    serialized_subject["resource"] = {"id": "output-mutation"}
+
+    assert observation.state == {"nested": ["original"]}
+    assert event.subject == {"resource": {"id": "original"}}
+
+
 def test_unsupported_sqlite_schema_version_fails_fast(tmp_path: Path) -> None:
     database = tmp_path / "watch.db"
     SQLiteStore(database)
@@ -121,3 +232,36 @@ def test_unsupported_sqlite_schema_version_fails_fast(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="unsupported database schema 2; expected 1"):
         SQLiteStore(database)
+
+
+def test_ambiguous_sqlite_schema_metadata_fails_fast(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    SQLiteStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO schema_meta(version) VALUES (1)")
+
+    with pytest.raises(RuntimeError, match="schema_meta must contain exactly one row"):
+        SQLiteStore(database)
+
+
+def test_persisted_event_schema_version_is_not_silently_masked(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database)
+    now = datetime(2025, 1, 1, tzinfo=UTC).isoformat().replace("+00:00", "Z")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO watches(watch_id, created_at, updated_at) VALUES ('watch-1', ?, ?)",
+            (now, now),
+        )
+        connection.execute(
+            """
+            INSERT INTO events(
+                event_id, watch_id, schema_version, event_type, severity, occurred_at,
+                dedupe_key, subject_json, payload_json, created_at
+            ) VALUES ('evt-1', 'watch-1', '2.0', 'changed', 'info', ?, 'key', '{}', '{}', ?)
+            """,
+            (now, now),
+        )
+
+    with pytest.raises(ValueError, match="schema_version"):
+        store.list_events("watch-1")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 from collections.abc import Awaitable, Callable
 from datetime import datetime, tzinfo
@@ -21,6 +22,14 @@ class IntervalTrigger:
         random_uniform: Callable[[float, float], float] = random.uniform,
         sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
+        for field_name, value in (
+            ("minimum_interval", minimum_interval),
+            ("maximum_interval", maximum_interval),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{field_name} must be a number")
+            if not math.isfinite(value):
+                raise ValueError(f"{field_name} must be finite")
         if minimum_interval <= 0:
             raise ValueError("minimum_interval must be positive")
         if maximum_interval < minimum_interval:
@@ -49,6 +58,8 @@ class CronTrigger:
         clock: Callable[[], datetime] = utc_now,
         sleep: AsyncSleep = asyncio.sleep,
     ) -> None:
+        if timezone is None:
+            raise ValueError("timezone must be explicit")
         if not croniter.is_valid(expression):
             raise ValueError(f"invalid cron expression: {expression}")
         self.expression = expression

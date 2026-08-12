@@ -200,6 +200,33 @@ class ExplodingTransitionPolicy:
         return []
 
 
+class MutatingTransitionPolicy:
+    def evaluate(
+        self, previous: Observation | None, current: Observation
+    ) -> list[EventDraft]:
+        assert isinstance(current.state, dict)
+        current.state["policy_mutation"] = True
+        return []
+
+
+def test_policy_cannot_change_persisted_authority_projection(tmp_path: Path) -> None:
+    database = tmp_path / "watch.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    observation = Observation.valid({"original": True}, observed_at=NOW)
+
+    store.record_observation("example", observation, MutatingTransitionPolicy(), now=NOW)
+
+    with sqlite3.connect(database) as connection:
+        observation_state = connection.execute(
+            "SELECT state_json FROM observations"
+        ).fetchone()[0]
+        authority_state = connection.execute(
+            "SELECT state_json FROM authoritative_states"
+        ).fetchone()[0]
+    assert observation_state == '{"original":true}'
+    assert authority_state == observation_state
+
+
 def test_policy_failure_preserves_observation_but_not_promotion(tmp_path: Path) -> None:
     database = tmp_path / "watch.db"
     store = SQLiteStore(database, clock=lambda: NOW)

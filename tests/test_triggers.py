@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from math import inf, nan
 from pathlib import Path
+
+import pytest
 
 from tests.helpers import NoEventsPolicy, SequenceObserver
 from watch_engine import (
@@ -23,6 +26,12 @@ def test_interval_jitter_stays_in_configured_range() -> None:
     assert [trigger.next_delay() for _ in range(3)] == [90.0, 117.5, 150.0]
 
 
+@pytest.mark.parametrize("value", [nan, inf, -inf])
+def test_interval_rejects_non_finite_configuration(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        IntervalTrigger(value, 10)
+
+
 def test_exponential_backoff_has_explicit_cap() -> None:
     from watch_engine import RetryPolicy
 
@@ -32,10 +41,35 @@ def test_exponential_backoff_has_explicit_cap() -> None:
     assert [retry.delay_for_failure(number) for number in range(1, 7)] == [2, 4, 8, 10, 10, 10]
 
 
+@pytest.mark.parametrize("value", [nan, inf, -inf])
+def test_retry_policy_rejects_non_finite_configuration(value: float) -> None:
+    from watch_engine import RetryPolicy
+
+    with pytest.raises(ValueError, match="finite"):
+        RetryPolicy(base_delay_seconds=value)
+
+
+def test_retry_policy_caps_extreme_failure_number_without_overflow() -> None:
+    from watch_engine import RetryPolicy
+
+    policy = RetryPolicy(
+        base_delay_seconds=1,
+        maximum_delay_seconds=60,
+        multiplier=2,
+    )
+
+    assert policy.delay_for_failure(10**100) == 60
+
+
 def test_cron_trigger_calculates_next_regular_schedule() -> None:
     trigger = CronTrigger("0 9 * * *", timezone=UTC)
     after = datetime(2025, 1, 1, 8, 30, tzinfo=UTC)
     assert trigger.next_fire_time(after) == datetime(2025, 1, 1, 9, 0, tzinfo=UTC)
+
+
+def test_cron_trigger_rejects_missing_explicit_timezone() -> None:
+    with pytest.raises(ValueError, match="timezone must be explicit"):
+        CronTrigger("0 9 * * *", timezone=None)  # type: ignore[arg-type]
 
 
 def test_manual_trigger_releases_one_watch_execution(tmp_path: Path) -> None:

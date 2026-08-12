@@ -84,14 +84,9 @@ from watch_engine import Observation
 
 class InventoryObserver:
     def observe(self) -> Observation:
-        try:
-            evidence = fetch_and_parse_inventory()
-        except TemporaryAccessError as exc:
-            return Observation.failed(
-                observed_at=datetime.now(timezone.utc),
-                error=str(exc),
-                evidence={"error_type": type(exc).__name__},
-            )
+        # 访问/解析异常直接抛给 Runtime，由引擎按有界策略重试；重试耗尽后
+        # 只持久化固定内建异常类别，不保存异常消息或下游自定义类名。
+        evidence = fetch_and_parse_inventory()
 
         if evidence.is_incomplete:
             return Observation.degraded(
@@ -256,10 +251,10 @@ dispatcher = OutboxDispatcher(store, NotificationSink(client))
 delivery_results = dispatcher.dispatch_ready()
 ```
 
-Runtime 与 Dispatcher 可以由同一进程的两个循环驱动，也可以由同一主机上的独立进程驱动。具体
-方式由下游负责，但必须遵守 v0.1 单节点边界，并保证一个 SQLite 数据库同一时刻只有一个活跃的
-Dispatcher。不要用多个 Dispatcher 进程并行提高吞吐；新 Dispatcher 启动时会把遗留
-`DELIVERING` 视为上一个投递进程已经中断。
+v0.1 的部署基线是：一个 SQLite 数据库只由一个本机监控进程拥有，Runtime 与 Dispatcher 都在
+该进程内运行。增加监控目标时，优先在同一进程内串行执行，不通过增加进程提高吞吐。只有未来出现
+大量独立目标或分布式部署等明确需求时，才重新设计租约、并发和存储架构。新进程只能在旧进程完全
+退出后启动，因为新 Dispatcher 会把遗留 `DELIVERING` 视为上一个投递进程已经中断。
 
 `WatchRunner.serve()` 只在两次运行之间检查 stop event。若它正在等待长 Interval/Cron，设置 stop
 不会立即唤醒等待；要求及时停机时，下游应取消外层 asyncio Task 或实现自己的信号/超时编排，并

@@ -135,8 +135,9 @@ same stored `event_id` again. Sinks must deduplicate by `event_id`. Failed attem
 bounded exponential backoff and survive restart. Exhausted events remain as `DEAD` diagnostics.
 
 Observer exceptions are retried within a run using the watch's bounded retry policy. When the
-attempt budget is exhausted, the runtime persists one `FAILED` observation with the exception
-type and attempt count; exception messages are deliberately discarded. An observer that
+attempt budget is exhausted, the runtime persists one `FAILED` observation with a fixed built-in
+exception category and the attempt count; exception messages and downstream-defined exception
+class names are deliberately discarded. An observer that
 deliberately returns `DEGRADED` or `FAILED` has already
 classified its evidence, so that result is persisted immediately and is not retried implicitly.
 
@@ -172,6 +173,10 @@ The test suite is entirely local and requires no network or third-party service.
 
 The runtime is intentionally single-node and synchronous at the observer/sink boundary. SQLite
 coordinates local transactions; it is not a distributed lock.
+
+The current deployment baseline is one local monitor process per SQLite database. That process
+owns both runners and the dispatcher; add targets serially in the same process instead of adding
+processes without a demonstrated scaling requirement.
 
 Runs for one `watch_id` may overlap at the Observer stage. Authority promotion is serialized by
 SQLite and ordered by `Observation.observed_at`. A VALID observation whose timestamp is older

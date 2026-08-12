@@ -3,6 +3,29 @@ from __future__ import annotations
 MAX_ERROR_CHARACTERS = 2048
 
 
+def safe_exception_type(exc: BaseException) -> str:
+    """Map exceptions to fixed built-in categories.
+
+    A downstream adapter controls its custom exception class name, so persisting
+    ``type(exc).__name__`` directly can leak a product, customer, or secret name.
+    """
+
+    categories: tuple[type[BaseException], ...] = (
+        TimeoutError,
+        ConnectionError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+        LookupError,
+        ArithmeticError,
+        OSError,
+    )
+    for category in categories:
+        if isinstance(exc, category):
+            return category.__name__
+    return "Exception"
+
+
 def safe_exception_text(exc: BaseException) -> str:
     """Return a diagnostic identifier without persisting an exception message.
 
@@ -12,7 +35,7 @@ def safe_exception_text(exc: BaseException) -> str:
     adapter's responsibility and must be logged with its own redaction policy.
     """
 
-    return f"{type(exc).__name__}: operation failed"
+    return f"{safe_exception_type(exc)}: operation failed"
 
 
 def bounded_error_text(error: str) -> str:

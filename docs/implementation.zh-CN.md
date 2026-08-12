@@ -96,6 +96,8 @@ watch-engine/
 - `OutboxDispatcher`
 
 新增公开能力时，必须先判断它属于公共契约还是内部实现；公开导出后必须纳入 Semantic Versioning 和兼容性测试。
+公开 dataclass 不只依赖类型注解：构造时会校验枚举、字符串、布尔值、非负计数、结果容器和配置
+对象类型，使直接构造与引擎内部产生的值遵守同一运行时不变量。
 
 ## 5. 核心模型实现
 
@@ -116,7 +118,7 @@ watch-engine/
 落地约束：
 
 - 构造时通过 `require_aware` 拒绝无时区时间；
-- `state` 与 `evidence` 通过 `validate_json` 校验；
+- `state` 与 `evidence` 通过严格 JSON 校验并复制，后续修改调用方原对象不会改变模型；
 - 提供 `valid()`、`degraded()`、`failed()` 工厂方法；
 - 只有 `VALID` 能进入 Authority 提升流程。
 
@@ -148,7 +150,8 @@ watch-engine/
 
 `min(base_delay × multiplier^(failure_number-1), maximum_delay)`
 
-参数在 dataclass 初始化时校验，拒绝无效次数、非正延迟和小于 1 的倍数。
+参数在 dataclass 初始化时校验，拒绝无效次数、非有限数、非正延迟和小于 1 的倍数；极大失败
+序号导致指数浮点溢出时直接返回最大延迟，不让配置边界击穿 Dispatcher。
 
 ### 5.4 DeliveryConfig
 
@@ -257,6 +260,7 @@ stop event 不会中断一个已经开始的 `Trigger.wait_next()`；长 Interva
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 PRAGMA journal_mode = WAL;
+PRAGMA secure_delete = ON;
 ```
 
 Python 连接参数：
@@ -265,7 +269,9 @@ Python 连接参数：
 - `timeout=5.0`；
 - `row_factory=sqlite3.Row`。
 
-v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代码支持版本，初始化直接失败，不进行静默迁移。
+连接会验证 WAL 与 `secure_delete` 的实际返回值，不支持时 fail-fast，而不是假定 PRAGMA 已生效。
+v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
+初始化直接失败，不进行静默迁移或任意选择第一行。
 
 ### 8.2 表结构
 
@@ -305,15 +311,19 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 
 `_promote_valid_observation()` 使用独立 `BEGIN IMMEDIATE`：
 
-1. 读取当前 Authority；
-2. 若 `current.observed_at <= previous.observed_at`：
+1. 从已持久化的 Observation 行重新构造 Current，并保存其规范 `state_json`；
+2. 读取当前 Authority；
+3. 若 `current.observed_at <= previous.observed_at`：
    - 提交空变更并返回；
    - 保留已保存 Observation；
    - 不调用 Policy，不生成 Event。
-3. 在事务内调用 `TransitionPolicy.evaluate(previous, current)`；
-4. 为每个 EventDraft 插入 `events` 和 `outbox`；
-5. UPSERT `authoritative_states`；
-6. 一次提交。
+4. 在事务内调用 `TransitionPolicy.evaluate(previous, current)`；
+5. 为每个 EventDraft 插入 `events` 和 `outbox`；
+6. 使用调用 Policy 前保存的规范状态 UPSERT `authoritative_states`；
+7. 一次提交。
+
+模型的嵌套 JSON 会在构造时脱离调用方对象；即使错误 Policy 仍尝试修改收到的 Current，Authority
+投影也只使用事务内重读且预先保存的持久状态，不会与 Observation 证据分叉。
 
 任一步异常都会回滚第二事务，因此不会出现：
 
@@ -336,7 +346,8 @@ v0.1 的数据库 Schema 版本为 `1`。如果现有数据库版本不等于代
 | `watches_deleted` | 删除的 Watch 行数；批量按时间清理时始终为 `0` |
 | `outbox_rows_deleted` | 删除的 Outbox 行数；作为新增字段追加在末尾以保持旧位置参数语义 |
 
-`purge_before()` 只删除截止时间以前的 `DELIVERED/DEAD` 事件链，以及不再被 Authority 引用的
+`purge_before()` 先把待删事件写入事务内临时目标表，再用子查询删除关联行，避免事件数量较大时
+触发 SQLite 绑定参数上限。它只删除截止时间以前的 `DELIVERED/DEAD` 事件链，以及不再被 Authority 引用的
 旧 Observation。`PENDING/RETRY/DELIVERING` 事件与当前 Authority 必须保留。`delete_watch()` 默认
 拒绝删除仍有未投递事件的 Watch；显式传入 `allow_undelivered=True` 才允许覆盖此保护。两个操作
 均在单个 `BEGIN IMMEDIATE` 事务中完成，任一 SQL 失败时整体回滚。
@@ -377,6 +388,9 @@ stateDiagram-v2
    - 保存错误和失败尝试；
 6. 返回 `DeliveryResult` 集合。
 
+成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、上次 `attempts` 和 `DELIVERING` 状态；
+伪造、错配或已经过期的 claim 不得更新 Outbox，也不得生成投递审计行。
+
 ### 9.3 一致性语义
 
 如果 Sink 已接受事件、但进程在 SQLite 记录成功前退出，恢复后会再次投递同一 `event_id`。因此实际语义是 at-least-once。
@@ -384,8 +398,8 @@ stateDiagram-v2
 落地要求：生产 EventSink 必须在外部服务或自身持久存储中按 `event_id` 幂等。进程内集合只能用于示例和测试。
 
 v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
-`DELIVERING`。因此同一 SQLite 数据库只能有一个活跃 Dispatcher；进程监督器必须保证旧实例退出后
-再启动替代实例。
+`DELIVERING`。因此同一 SQLite 数据库只能有一个本机监控进程，Runner 与 Dispatcher 均由该进程
+持有；进程监督器必须保证旧实例退出后再启动替代实例。增加目标时使用同一进程内串行调度。
 
 ## 10. JSON 与时间实现
 
@@ -393,9 +407,13 @@ v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_fli
 
 `src/watch_engine/_json.py` 负责：
 
-- 拒绝不可 JSON 序列化的 state/evidence/subject/payload；
-- 确定性编码，避免键顺序导致不稳定持久化；
-- 从 SQLite 文本恢复 JSON 值。
+- 递归拒绝 tuple、非字符串对象 key、循环引用及其他会被 `json.dumps()` 静默改写的非 JSON 类型；
+- 拒绝 `NaN` 与正负无穷；
+- 最多允许 100 层容器嵌套，避免无环超深输入触发 Python 递归栈异常；
+- 以 UTF-8 编码后的完整字节数执行 1 MiB 上限；
+- 使用稳定 key 排序和紧凑分隔符持久化；
+- 构造领域模型时通过规范编解码复制嵌套数据，保证 frozen dataclass 不被外部可变引用绕过；
+- 从 SQLite 文本恢复时再次执行大小、深度和形状校验，损坏数据不会被静默接受。
 
 ### 10.2 时间
 
@@ -491,7 +509,10 @@ v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动�
 9. Trigger 参数、时区和手动信号；
 10. Watch Event v1 Schema；
 11. Public API 可导入；
-12. SQLite Schema 版本不匹配时 fail-fast。
+12. SQLite Schema 版本不匹配或 `schema_meta` 歧义时 fail-fast；
+13. 严格 JSON 形状、大小、深度与防御性复制；
+14. Outbox 确认必须与 claim 身份和尝试次数一致；
+15. 超大批量清理不依赖 SQLite 可变长度参数列表。
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
@@ -656,6 +677,8 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | 异常或业务标识含 Token/个人信息 | `_errors.safe_exception_text`、Runtime、Dispatcher | sentinel 与调用方标识不进入库日志，异常消息不进入数据库 |
 | 历史无限增长 | `purge_before/delete_watch/compact_storage` | Authority/未投递保护与破坏性 override 测试 |
 | 超大持久化字段 | `_json.MAX_JSON_BYTES`、`bounded_error_text` | 1 MiB/2,048 字符边界测试 |
+| 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |
+| 错配或过期 Outbox 确认 | claim 的 event/attempt 条件更新 | 伪造 claim 不改变状态、不写审计行 |
 | Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |
 | 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
 

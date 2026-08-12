@@ -85,13 +85,21 @@ class SQLiteStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, isolation_level=None, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA secure_delete = ON")
-        self._secure_database_files()
-        return connection
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            journal_mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+            if str(journal_mode).lower() != "wal":
+                raise RuntimeError("SQLite WAL mode is required")
+            secure_delete = connection.execute("PRAGMA secure_delete = ON").fetchone()[0]
+            if int(secure_delete) != 1:
+                raise RuntimeError("SQLite secure_delete support is required")
+            self._secure_database_files()
+            return connection
+        except Exception:
+            connection.close()
+            raise
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -184,19 +192,30 @@ class SQLiteStore:
                 );
                 """
             )
-            row = connection.execute("SELECT version FROM schema_meta").fetchone()
-            if row is None:
-                connection.execute(
-                    "INSERT INTO schema_meta(version) VALUES (?)", (self.SCHEMA_VERSION,)
-                )
-            elif int(row["version"]) != self.SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"unsupported database schema {row['version']}; expected {self.SCHEMA_VERSION}"
-                )
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute("SELECT version FROM schema_meta").fetchall()
+                if not rows:
+                    connection.execute(
+                        "INSERT INTO schema_meta(version) VALUES (?)",
+                        (self.SCHEMA_VERSION,),
+                    )
+                elif len(rows) != 1:
+                    raise RuntimeError("schema_meta must contain exactly one row")
+                elif int(rows[0]["version"]) != self.SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"unsupported database schema {rows[0]['version']}; "
+                        f"expected {self.SCHEMA_VERSION}"
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def _ensure_watch(
         self, connection: sqlite3.Connection, watch_id: str, now: datetime
     ) -> None:
+        self._validate_watch_id(watch_id)
         now_text = to_iso(now)
         connection.execute(
             """
@@ -226,6 +245,7 @@ class SQLiteStore:
     def mark_run_error(
         self, watch_id: str, error: str, *, now: datetime | None = None
     ) -> None:
+        self._validate_watch_id(watch_id)
         timestamp = now or self._clock()
         with self._connect() as connection:
             connection.execute(
@@ -250,13 +270,16 @@ class SQLiteStore:
         non-stale VALID observation, authority, events, and outbox rows are one
         independent transaction.
         """
+        self._validate_watch_id(watch_id)
         timestamp = now or self._clock()
         observation_id = self._observation_id_factory()
+        if not isinstance(observation_id, str) or not observation_id:
+            raise ValueError("observation_id_factory must return a non-empty string")
         self._persist_observation(watch_id, observation_id, observation, timestamp)
         if observation.status is not ObservationStatus.VALID:
             return ()
         return self._promote_valid_observation(
-            watch_id, observation_id, observation, policy, timestamp
+            watch_id, observation_id, policy, timestamp
         )
 
     def _persist_observation(
@@ -313,20 +336,31 @@ class SQLiteStore:
         self,
         watch_id: str,
         observation_id: str,
-        observation: Observation,
         policy: TransitionPolicy,
         now: datetime,
     ) -> tuple[WatchEvent, ...]:
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
+                current_row = connection.execute(
+                    """
+                    SELECT status, observed_at, state_json, evidence_json, error
+                    FROM observations
+                    WHERE observation_id = ? AND watch_id = ?
+                    """,
+                    (observation_id, watch_id),
+                ).fetchone()
+                if current_row is None:
+                    raise RuntimeError("persisted observation is missing during promotion")
+                current = self._observation_from_row(current_row)
+                authority_state_json = str(current_row["state_json"])
                 previous = self._read_authoritative(connection, watch_id)
-                if previous is not None and observation.observed_at <= previous.observed_at:
+                if previous is not None and current.observed_at <= previous.observed_at:
                     connection.commit()
                     logger.info(
                         "stale valid observation retained without authority promotion",
                         extra={
-                            "observed_at": to_iso(observation.observed_at),
+                            "observed_at": to_iso(current.observed_at),
                             "authority_observed_at": to_iso(previous.observed_at),
                         },
                     )
@@ -334,9 +368,9 @@ class SQLiteStore:
 
                 # Policy is deliberately inside this atomic promotion decision. Its
                 # public contract therefore requires fast, pure, side-effect-free work.
-                drafts = policy.evaluate(previous, observation)
+                drafts = policy.evaluate(previous, current)
                 created_events = self._insert_events(
-                    connection, watch_id, observation, drafts, now
+                    connection, watch_id, current, drafts, now
                 )
                 connection.execute(
                     """
@@ -352,8 +386,8 @@ class SQLiteStore:
                     (
                         watch_id,
                         observation_id,
-                        encode_json(observation.state),
-                        to_iso(observation.observed_at),
+                        authority_state_json,
+                        to_iso(current.observed_at),
                         to_iso(now),
                     ),
                 )
@@ -449,10 +483,12 @@ class SQLiteStore:
         )
 
     def get_authoritative_observation(self, watch_id: str) -> Observation | None:
+        self._validate_watch_id(watch_id)
         with self._connect() as connection:
             return self._read_authoritative(connection, watch_id)
 
     def list_observations(self, watch_id: str) -> list[Observation]:
+        self._validate_watch_id(watch_id)
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -464,6 +500,7 @@ class SQLiteStore:
         return [self._observation_from_row(row) for row in rows]
 
     def list_events(self, watch_id: str) -> list[WatchEvent]:
+        self._validate_watch_id(watch_id)
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM events WHERE watch_id = ? ORDER BY rowid", (watch_id,)
@@ -477,7 +514,7 @@ class SQLiteStore:
         if not isinstance(subject, dict) or not isinstance(payload, dict):
             raise RuntimeError("persisted event subject/payload is not an object")
         return WatchEvent(
-            schema_version="1.0",
+            schema_version=row["schema_version"],
             event_id=row["event_id"],
             watch_id=row["watch_id"],
             event_type=row["event_type"],
@@ -504,6 +541,10 @@ class SQLiteStore:
     def claim_due(
         self, *, now: datetime | None = None, limit: int = 100
     ) -> list[ClaimedEvent]:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         timestamp = now or self._clock()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -519,9 +560,12 @@ class SQLiteStore:
             ids = [int(row["outbox_id"]) for row in rows]
             if ids:
                 placeholders = ",".join("?" for _ in ids)
+                claim_sql = (
+                    f"UPDATE outbox SET status = 'DELIVERING', locked_at = ?, "  # noqa: S608
+                    f"updated_at = ? WHERE outbox_id IN ({placeholders})"
+                )
                 connection.execute(
-                    f"UPDATE outbox SET status = 'DELIVERING', locked_at = ?, updated_at = ? "
-                    f"WHERE outbox_id IN ({placeholders})",  # noqa: S608 - placeholders only
+                    claim_sql,
                     (to_iso(timestamp), to_iso(timestamp), *ids),
                 )
             connection.commit()
@@ -545,9 +589,17 @@ class SQLiteStore:
                 """
                 UPDATE outbox SET status = 'DELIVERED', attempts = ?, delivered_at = ?,
                     next_attempt_at = NULL, locked_at = NULL, last_error = NULL, updated_at = ?
-                WHERE outbox_id = ? AND status = 'DELIVERING'
+                WHERE outbox_id = ? AND event_id = ? AND attempts = ?
+                  AND status = 'DELIVERING'
                 """,
-                (attempt_number, to_iso(timestamp), to_iso(timestamp), claimed.outbox_id),
+                (
+                    attempt_number,
+                    to_iso(timestamp),
+                    to_iso(timestamp),
+                    claimed.outbox_id,
+                    claimed.event.event_id,
+                    claimed.attempts,
+                ),
             )
             if cursor.rowcount != 1:
                 connection.rollback()
@@ -574,7 +626,8 @@ class SQLiteStore:
                 """
                 UPDATE outbox SET status = ?, attempts = ?, next_attempt_at = ?,
                     locked_at = NULL, last_error = ?, updated_at = ?
-                WHERE outbox_id = ? AND status = 'DELIVERING'
+                WHERE outbox_id = ? AND event_id = ? AND attempts = ?
+                  AND status = 'DELIVERING'
                 """,
                 (
                     status,
@@ -583,6 +636,8 @@ class SQLiteStore:
                     bounded_error_text(error),
                     to_iso(timestamp),
                     claimed.outbox_id,
+                    claimed.event.event_id,
+                    claimed.attempts,
                 ),
             )
             if cursor.rowcount != 1:
@@ -608,6 +663,7 @@ class SQLiteStore:
         event_parameters: list[str] = [cutoff_text]
         observation_parameters: list[str] = [cutoff_text]
         if watch_id is not None:
+            self._validate_watch_id(watch_id)
             event_filter += " AND e.watch_id = ?"
             observation_filter += " AND o.watch_id = ?"
             event_parameters.append(watch_id)
@@ -616,32 +672,41 @@ class SQLiteStore:
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
-                terminal_rows = connection.execute(
+                connection.execute(
+                    """
+                    CREATE TEMP TABLE purge_targets(
+                        outbox_id INTEGER PRIMARY KEY,
+                        event_id TEXT NOT NULL UNIQUE
+                    )
+                    """
+                )
+                connection.execute(
                     f"""
+                    INSERT INTO purge_targets(outbox_id, event_id)
                     SELECT o.outbox_id, e.event_id
                     FROM outbox o JOIN events e ON e.event_id = o.event_id
                     WHERE {event_filter} AND o.status IN ('DELIVERED', 'DEAD')
                     """,  # noqa: S608 - only fixed clauses are composed
                     event_parameters,
-                ).fetchall()
-                outbox_ids = [int(row["outbox_id"]) for row in terminal_rows]
-                event_ids = [str(row["event_id"]) for row in terminal_rows]
-                attempts_deleted = 0
-                outbox_deleted = 0
-                events_deleted = 0
-                if outbox_ids:
-                    placeholders = ",".join("?" for _ in outbox_ids)
-                    attempts_deleted = connection.execute(
-                        f"DELETE FROM delivery_attempts WHERE outbox_id IN ({placeholders})",
-                        outbox_ids,
-                    ).rowcount
-                    outbox_deleted = connection.execute(
-                        f"DELETE FROM outbox WHERE outbox_id IN ({placeholders})", outbox_ids
-                    ).rowcount
-                    event_placeholders = ",".join("?" for _ in event_ids)
-                    events_deleted = connection.execute(
-                        f"DELETE FROM events WHERE event_id IN ({event_placeholders})", event_ids
-                    ).rowcount
+                )
+                attempts_deleted = connection.execute(
+                    """
+                    DELETE FROM delivery_attempts
+                    WHERE outbox_id IN (SELECT outbox_id FROM purge_targets)
+                    """
+                ).rowcount
+                outbox_deleted = connection.execute(
+                    """
+                    DELETE FROM outbox
+                    WHERE outbox_id IN (SELECT outbox_id FROM purge_targets)
+                    """
+                ).rowcount
+                events_deleted = connection.execute(
+                    """
+                    DELETE FROM events
+                    WHERE event_id IN (SELECT event_id FROM purge_targets)
+                    """
+                ).rowcount
 
                 observations_deleted = connection.execute(
                     f"""
@@ -667,6 +732,7 @@ class SQLiteStore:
 
     def delete_watch(self, watch_id: str, *, allow_undelivered: bool = False) -> PurgeResult:
         """Delete one watch after owners stop, refusing queued delivery by default."""
+        self._validate_watch_id(watch_id)
         with self._connect() as connection:
             try:
                 connection.execute("BEGIN IMMEDIATE")
@@ -766,3 +832,10 @@ class SQLiteStore:
                 "SELECT * FROM delivery_attempts ORDER BY attempt_id"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def _validate_watch_id(watch_id: object) -> None:
+        if not isinstance(watch_id, str):
+            raise TypeError("watch_id must be a string")
+        if not watch_id:
+            raise ValueError("watch_id must not be empty")

@@ -66,6 +66,27 @@ class LeakingPolicy:
         return []
 
 
+class AdapterSpecificSecretError(RuntimeError):
+    pass
+
+
+class BulkEventPolicy:
+    def __init__(self, count: int) -> None:
+        self.count = count
+
+    def evaluate(self, previous: Observation | None, current: Observation) -> list[EventDraft]:
+        return [
+            EventDraft(
+                event_type="bulk.event",
+                severity="info",
+                dedupe_key=f"bulk-{index}",
+                subject={},
+                payload={"index": index},
+            )
+            for index in range(self.count)
+        ]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission semantics")
 def test_database_and_live_sidecars_are_owner_only(tmp_path: Path) -> None:
     previous = os.umask(0o022)
@@ -106,6 +127,39 @@ def test_symbolic_link_database_is_rejected(tmp_path: Path) -> None:
 def test_memory_database_fails_fast_instead_of_losing_schema_between_connections() -> None:
     with pytest.raises(ValueError, match="file-backed"):
         SQLiteStore(":memory:")
+
+
+def test_storage_public_methods_reject_empty_watch_id(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    with pytest.raises(ValueError, match="watch_id must not be empty"):
+        store.record_observation(
+            "",
+            Observation.valid("state", observed_at=NOW),
+            StateChangePolicy(),
+            now=NOW,
+        )
+    with pytest.raises(ValueError, match="watch_id must not be empty"):
+        store.delete_watch("")
+
+
+def test_storage_rejects_invalid_observation_id_factory(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", observation_id_factory=lambda: "")
+    with pytest.raises(ValueError, match="observation_id_factory"):
+        store.record_observation(
+            "watch",
+            Observation.valid("state", observed_at=NOW),
+            StateChangePolicy(),
+            now=NOW,
+        )
+
+
+def test_adoption_guide_does_not_teach_exception_detail_persistence() -> None:
+    guide = (
+        Path(__file__).parents[1] / "docs" / "adoption-guide.zh-CN.md"
+    ).read_text(encoding="utf-8")
+
+    assert "error=str(exc)" not in guide
+    assert '"error_type": type(exc).__name__' not in guide
 
 
 def test_purge_result_keeps_existing_positional_field_order() -> None:
@@ -198,6 +252,26 @@ def test_purge_can_be_scoped_to_one_watch(tmp_path: Path) -> None:
     assert store.get_authoritative_observation("second") is not None
 
 
+def test_purge_handles_more_rows_than_legacy_sqlite_parameter_limits(tmp_path: Path) -> None:
+    count = 1_200
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    events = store.record_observation(
+        "bulk",
+        Observation.valid("state", observed_at=NOW),
+        BulkEventPolicy(count),
+        now=NOW,
+    )
+    assert len(events) == count
+    with store._connect() as connection:
+        connection.execute("UPDATE outbox SET status = 'DELIVERED'")
+
+    result = store.purge_before(NOW + timedelta(seconds=1))
+
+    assert result.events_deleted == count
+    assert result.outbox_rows_deleted == count
+    assert store.list_events("bulk") == []
+
+
 def test_purge_rejects_naive_cutoff(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db")
     with pytest.raises(ValueError, match="timezone-aware"):
@@ -244,6 +318,28 @@ def test_exception_message_never_reaches_logs_or_database(
     assert result.observation.error == "RuntimeError: operation failed"
     assert secret not in caplog.text
     assert all(secret.encode() not in path.read_bytes() for path in tmp_path.glob("watch.db*"))
+
+
+def test_custom_exception_class_name_never_reaches_logs_or_database(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class_name = "customer_private_product_error"
+    AdapterSpecificSecretError.__name__ = class_name
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    definition = WatchDefinition(
+        watch_id="redaction",
+        trigger=ManualTrigger(),
+        observer=SequenceObserver([AdapterSpecificSecretError("failure")] * 3),
+        transition_policy=StateChangePolicy(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = WatchRuntime(store, clock=lambda: NOW, sleep=lambda _: None).run_once(definition)
+
+    assert result.observation.error == "RuntimeError: operation failed"
+    assert result.observation.evidence["exception_type"] == "RuntimeError"
+    assert class_name not in caplog.text
+    assert all(class_name.encode() not in path.read_bytes() for path in tmp_path.glob("watch.db*"))
 
 
 def test_sink_exception_message_never_reaches_logs_or_database(

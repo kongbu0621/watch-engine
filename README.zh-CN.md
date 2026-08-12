@@ -127,7 +127,8 @@ I/O、修改 SQLite 之外的状态或产生无法回滚的副作用。这些操
 指数退避，并能在重启后继续。重试耗尽的事件会以 `DEAD` 状态保留，供诊断使用。
 
 Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策略重试。尝试次数耗尽后，运行时会
-持久化一份 `FAILED` Observation，其中包含异常类型和尝试次数；异常消息会被主动丢弃。若 Observer 主动返回
+持久化一份 `FAILED` Observation，其中只包含固定内建异常类别和尝试次数；异常消息与下游自定义
+异常类名会被主动丢弃。若 Observer 主动返回
 `DEGRADED` 或 `FAILED`，说明它已经对证据完成分类，因此该结果会立即持久化，不会被隐式重试。
 
 所有时间戳都包含时区信息并统一为 UTC。JSON 采用确定性的键排序方式存储。跨项目集成契约是
@@ -166,6 +167,9 @@ python -m pip_audit . --progress-spinner=off
 
 运行时有意限定为单节点，并在 Observer/EventSink 边界采用同步调用。SQLite 负责协调本地事务，
 但它不是分布式锁。
+
+当前部署基线是一个 SQLite 数据库只运行一个本机监控进程，Runner 与 Dispatcher 都由该进程拥有；
+增加监控目标时优先在同一进程内串行执行，不盲目增加进程。
 
 同一 `watch_id` 的多个运行可以在 Observer 阶段重叠。Authority 提升由 SQLite 串行化，并按
 `Observation.observed_at` 排序。时间戳早于或等于当前 Authority 的 `VALID` Observation 只会

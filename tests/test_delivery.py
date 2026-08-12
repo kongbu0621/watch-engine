@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from tests.helpers import SequenceObserver, StateChangePolicy
 from watch_engine import (
     DeliveryConfig,
@@ -15,6 +17,7 @@ from watch_engine import (
     WatchEvent,
     WatchRuntime,
 )
+from watch_engine.storage import ClaimedEvent
 
 NOW = datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
 
@@ -97,6 +100,44 @@ def test_stable_event_id_supports_downstream_dedupe_after_crash(tmp_path: Path) 
     assert result[0].delivered is True
     assert sink.calls == [event.event_id, event.event_id]
     assert sink.processed == [event.event_id]
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_claim_due_rejects_non_positive_limit(tmp_path: Path, limit: int) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    with pytest.raises(ValueError, match="at least 1"):
+        store.claim_due(now=NOW, limit=limit)
+
+
+def test_delivery_acknowledgement_must_match_claimed_event(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    event = make_pending_event(store)
+    claimed = store.claim_due(now=NOW)[0]
+    forged_event = WatchEvent(
+        schema_version=event.schema_version,
+        event_id="different-event",
+        watch_id=event.watch_id,
+        event_type=event.event_type,
+        severity=event.severity,
+        occurred_at=event.occurred_at,
+        dedupe_key=event.dedupe_key,
+        subject=event.subject,
+        payload=event.payload,
+    )
+
+    with pytest.raises(RuntimeError, match="no longer active"):
+        store.record_delivery_failure(
+            ClaimedEvent(claimed.outbox_id, claimed.attempts, forged_event),
+            "failed",
+            retry_at=None,
+            now=NOW,
+        )
+    with pytest.raises(RuntimeError, match="no longer active"):
+        store.record_delivery_success(
+            ClaimedEvent(claimed.outbox_id, claimed.attempts + 1, claimed.event), now=NOW
+        )
+
+    assert store.outbox_rows()[0]["status"] == "DELIVERING"
 
 
 def test_state_cycle_can_create_same_transition_again(tmp_path: Path) -> None:
