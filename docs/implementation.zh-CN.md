@@ -32,7 +32,9 @@
 | CI | GitHub Actions，Python 3.11/3.12/3.13/3.14 |
 | 许可证 | Apache License 2.0 |
 
-运行时依赖仅包含 `croniter>=2.0,<7`。pytest、`mypy>=1.11,<3`、Ruff、jsonschema 和 rfc3339-validator 位于 `dev` 可选依赖；mypy 2.x 只扩展开发期静态检查工具的允许范围，不改变 Runtime Dependency 或 Public API。
+运行时依赖仅包含 `croniter>=2.0,<7`。pytest、`mypy>=1.11,<3`、Ruff、jsonschema 和
+rfc3339-validator 位于 `dev` 可选依赖；mypy 2.x 只扩展开发期静态检查工具的允许范围，不改变
+Runtime Dependency 或 Public API。
 
 ## 3. 仓库与代码映射
 
@@ -619,12 +621,15 @@ python -m mypy src
 python -m pip_audit --local --progress-spinner=off
 ```
 
-mypy 对 `watch_engine` 使用 strict 模式，`dev` 约束允许已验证的 1.x 与 2.x 版本，并由完整 CI 矩阵持续验证。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM 规则集。CI 已先安装 `.[dev]`，所以依赖审计必须使用 `--local` 检查该隔离环境中实际安装的运行依赖、
+mypy 对 `watch_engine` 使用 strict 模式，`dev` 约束允许已验证的 1.x 与 2.x 版本，并由完整 CI
+矩阵持续验证。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM 规则集。CI 已先安装
+`.[dev]`，所以依赖审计必须使用 `--local` 检查该隔离环境中实际安装的运行依赖、
 测试工具、构建工具和静态检查工具；只把项目路径 `.` 传给 `pip-audit` 会重新解析项目运行依赖，不能
 覆盖已安装的开发/CI 依赖。构建后端与开发环境都要求 `setuptools>=83`，避免 runner 预装的已知
 漏洞版本进入构建或审计链路。GitHub Actions 固定到官方 `checkout` v7
 （`3d3c42e5aac5ba805825da76410c181273ba90b1`）与 `setup-python` v7
-（`5fda3b95a4ea91299a34e894583c3862153e4b97`）的精确 Commit SHA；两者使用 Node 24，避免依赖 runner 对已弃用 Node 20 的临时强制兼容。
+（`5fda3b95a4ea91299a34e894583c3862153e4b97`）的精确 Commit SHA；两者使用 Node 24，避免依赖
+runner 对已弃用 Node 20 的临时强制兼容。
 
 ### 15.3 包构建与隔离安装
 
