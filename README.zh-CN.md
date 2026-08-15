@@ -138,10 +138,10 @@ definition = WatchDefinition(
     transition_policy=HealthTransitions(),
 )
 
-# One observation, independent of scheduling:
+# 执行一次 Observation，不依赖 Trigger 调度：
 result = WatchRuntime(store).run_once(definition)
 
-# Deliver all currently due events. Run this repeatedly in a worker/process loop.
+# 投递当前所有到期 Event；在 Worker/进程循环中重复调用：
 delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
