@@ -25,6 +25,32 @@ def test_required_document_layers_exist_and_are_discoverable() -> None:
         assert f"({name})" in chinese_readme
 
 
+def test_readmes_explain_purpose_and_reuse_decision_up_front() -> None:
+    english = (ROOT / "README.md").read_text(encoding="utf-8")
+    chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+
+    for required in (
+        "## What this module is for",
+        "| Reuse question |",
+        "Reuse this module when:",
+        "Do not use this module when:",
+    ):
+        assert required in english
+
+    for required in (
+        "## 这个模块有什么用",
+        "| 复用判断 |",
+        "适合复用这个模块的情况：",
+        "不适合使用这个模块的情况：",
+    ):
+        assert required in chinese
+
+    first_english_detail = english.index("## Core concepts")
+    first_chinese_detail = chinese.index("## 核心概念")
+    assert english.index("## What this module is for") < first_english_detail
+    assert chinese.index("## 这个模块有什么用") < first_chinese_detail
+
+
 def test_relative_markdown_links_resolve() -> None:
     link_pattern = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
     missing: list[tuple[str, str]] = []
