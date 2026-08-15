@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-MARKDOWN_FILES = tuple(sorted((*ROOT.glob("*.md"), *ROOT.glob("docs/*.md"))))
+MARKDOWN_FILES = tuple(sorted((*ROOT.glob("*.md"), *ROOT.glob("docs/**/*.md"))))
 REQUIRED_PROGRAM_DOCUMENTS = (
     "module-requirements.zh-CN.md",
     "architecture.zh-CN.md",
@@ -69,6 +69,36 @@ def test_chinese_documents_retain_searchable_english_terms() -> None:
         assert english_term.search(content), (
             f"Chinese document lost all English terminology: {document.relative_to(ROOT)}"
         )
+
+    required_terms = {
+        "README.zh-CN.md": ("Observer", "Authority", "TransitionPolicy", "Outbox", "EventSink"),
+        "SECURITY.zh-CN.md": ("SQLite", "Observer", "TransitionPolicy", "EventSink"),
+        "DATA-GOVERNANCE.zh-CN.md": ("Observation", "Authority", "WatchEvent", "EventSink"),
+        "AGENTS.zh-CN.md": ("Observer", "Authority", "TransitionPolicy", "Outbox", "at-least-once"),
+        "CONTRIBUTING.zh-CN.md": ("Core", "Adapter", "Architecture", "Implementation"),
+        "docs/module-requirements.zh-CN.md": ("Public API", "Observer", "Authority", "Outbox"),
+        "docs/architecture.zh-CN.md": ("Runtime", "TransitionPolicy", "Authority", "EventSink"),
+        "docs/implementation.zh-CN.md": ("Public API", "SQLite", "OutboxDispatcher", "CI"),
+        "docs/adoption-guide.zh-CN.md": (
+            "Observer",
+            "TransitionPolicy",
+            "EventSink",
+            "WatchDefinition",
+        ),
+    }
+    for relative_path, terms in required_terms.items():
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        for term in terms:
+            assert term in content, f"{term} missing from {relative_path}"
+
+
+def test_bilingual_requirement_is_traceable_from_requirement_to_implementation() -> None:
+    requirements = (ROOT / "docs/module-requirements.zh-CN.md").read_text(encoding="utf-8")
+    implementation = (ROOT / "docs/implementation.zh-CN.md").read_text(encoding="utf-8")
+    assert "NFR-08 中文文档可用性" in requirements
+    assert "NFR-08 中文文档可用性" in implementation
+    assert ".zh-CN.md" in requirements
+    assert ".zh-CN.md" in implementation
 
 
 def test_sdist_manifest_keeps_chinese_counterparts_of_packaged_documents() -> None:
