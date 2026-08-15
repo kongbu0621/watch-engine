@@ -285,9 +285,21 @@ def test_dependency_audit_covers_installed_development_environment() -> None:
         (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
     assert "setuptools>=83" in configuration["build-system"]["requires"]
-    assert "setuptools>=83" in configuration["project"]["optional-dependencies"]["dev"]
-    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5" in workflow
-    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6" in workflow
+    development_dependencies = configuration["project"]["optional-dependencies"]["dev"]
+    assert "setuptools>=83" in development_dependencies
+    assert "mypy>=1.11,<3" in development_dependencies
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7" in workflow
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7" in workflow
+
+    implementation = (ROOT / "docs/implementation.zh-CN.md").read_text(encoding="utf-8")
+    for expected in (
+        "`mypy>=1.11,<3`",
+        "`checkout` v7",
+        "3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "`setup-python` v7",
+        "5fda3b95a4ea91299a34e894583c3862153e4b97",
+    ):
+        assert expected in implementation
 
 
 def test_supported_python_and_package_validation_are_enforced_in_ci() -> None:
