@@ -32,7 +32,9 @@
 | CI | GitHub Actions，Python 3.11/3.12/3.13/3.14 |
 | 许可证 | Apache License 2.0 |
 
-运行时依赖仅包含 `croniter>=2.0,<7`。pytest、mypy、Ruff、jsonschema 和 rfc3339-validator 位于 `dev` 可选依赖。
+运行时依赖仅包含 `croniter>=2.0,<7`。pytest、`mypy>=1.11,<3`、Ruff、jsonschema 和
+rfc3339-validator 位于 `dev` 可选依赖；mypy 2.x 只扩展开发期静态检查工具的允许范围，不改变
+Runtime Dependency 或 Public API。
 
 ## 3. 仓库与代码映射
 
@@ -619,12 +621,15 @@ python -m mypy src
 python -m pip_audit --local --progress-spinner=off
 ```
 
-mypy 对 `watch_engine` 使用 strict 模式。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM
-规则集。CI 已先安装 `.[dev]`，所以依赖审计必须使用 `--local` 检查该隔离环境中实际安装的运行依赖、
+mypy 对 `watch_engine` 使用 strict 模式，`dev` 约束允许已验证的 1.x 与 2.x 版本，并由完整 CI
+矩阵持续验证。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM 规则集。CI 已先安装
+`.[dev]`，所以依赖审计必须使用 `--local` 检查该隔离环境中实际安装的运行依赖、
 测试工具、构建工具和静态检查工具；只把项目路径 `.` 传给 `pip-audit` 会重新解析项目运行依赖，不能
 覆盖已安装的开发/CI 依赖。构建后端与开发环境都要求 `setuptools>=83`，避免 runner 预装的已知
-漏洞版本进入构建或审计链路。GitHub Actions 固定到官方 `checkout` v5 与 `setup-python` v6 的精确
-提交 SHA；两者使用 Node 24，避免依赖 runner 对已弃用 Node 20 的临时强制兼容。
+漏洞版本进入构建或审计链路。GitHub Actions 固定到官方 `checkout` v7
+（`3d3c42e5aac5ba805825da76410c181273ba90b1`）与 `setup-python` v7
+（`5fda3b95a4ea91299a34e894583c3862153e4b97`）的精确 Commit SHA；两者使用 Node 24，避免依赖
+runner 对已弃用 Node 20 的临时强制兼容。
 
 ### 15.3 包构建与隔离安装
 
@@ -773,7 +778,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | Event v1 被实现边界意外收紧 | 根与 wheel 的 `watch-event-v1.json` | 与 `v0.1.0` 发布基线保持相同合法值集合，并验证超长旧合法标识符 |
 | ISO 时间文本混合精度导致顺序反转 | `_sortable_timestamp_sql`、`to_sortable_iso` | 到期领取与清理覆盖整秒/微秒边界及旧数据库文本 |
 | 已知存在漏洞的开发/构建依赖 | `pytest>=9.0.3,<10`、`setuptools>=83`、CI 的 `pip-audit --local` | 使用安全版本重跑完整测试，并审计隔离环境中实际安装的运行与开发依赖 |
-| GitHub Action 运行时弃用 | 固定 SHA 的 `checkout` v5、`setup-python` v6 | 使用 Node 24 版本，远端日志不得再出现 Node 20 强制兼容告警 |
+| GitHub Action 运行时弃用 | 固定 Commit SHA 的 `checkout` v7、`setup-python` v7 | 使用 Node 24 版本，远端日志不得再出现 Node 20 强制兼容告警；版本说明与固定 SHA 由测试保持一致 |
 | 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
 | 无界投递批量 | `DeliveryConfig` 与 `claim_due` 的 500 条上限 | 501 在数据库操作前拒绝 |
 
