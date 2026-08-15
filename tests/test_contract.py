@@ -11,10 +11,14 @@ from jsonschema.exceptions import ValidationError
 
 import watch_engine
 from watch_engine import (
+    DeliveryAttemptDiagnostic,
+    DeliveryAttemptStatus,
     DeliveryResult,
     EventDraft,
     Observation,
     ObservationStatus,
+    OutboxDiagnostic,
+    OutboxStatus,
     PurgeResult,
     RunResult,
     RunStatus,
@@ -27,6 +31,8 @@ from watch_engine import (
 EXPECTED_PUBLIC_API = {
     "CronTrigger",
     "DeliveryConfig",
+    "DeliveryAttemptDiagnostic",
+    "DeliveryAttemptStatus",
     "DeliveryResult",
     "EventDraft",
     "EventSink",
@@ -36,6 +42,8 @@ EXPECTED_PUBLIC_API = {
     "ObservationStatus",
     "Observer",
     "OutboxDispatcher",
+    "OutboxDiagnostic",
+    "OutboxStatus",
     "PurgeResult",
     "RetryPolicy",
     "RunStatus",
@@ -289,6 +297,50 @@ def test_watch_status_rejects_invalid_runtime_values() -> None:
     )
     with pytest.raises(AttributeError):
         status.observation_count = 2  # type: ignore[misc]
+
+
+def test_typed_delivery_diagnostics_reject_invalid_runtime_values() -> None:
+    timestamp = datetime(2025, 1, 1, tzinfo=UTC)
+    with pytest.raises(TypeError, match="status must be an OutboxStatus"):
+        OutboxDiagnostic(
+            outbox_id=1,
+            event_id="event",
+            watch_id="watch",
+            status="PENDING",  # type: ignore[arg-type]
+            attempts=0,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+    with pytest.raises(ValueError, match="outbox_id must be positive"):
+        OutboxDiagnostic(
+            outbox_id=0,
+            event_id="event",
+            watch_id="watch",
+            status=OutboxStatus.PENDING,
+            attempts=0,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+    with pytest.raises(TypeError, match="status must be a DeliveryAttemptStatus"):
+        DeliveryAttemptDiagnostic(
+            attempt_id=1,
+            outbox_id=1,
+            event_id="event",
+            watch_id="watch",
+            attempt_number=1,
+            attempted_at=timestamp,
+            status="FAILED",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="attempt_number must be positive"):
+        DeliveryAttemptDiagnostic(
+            attempt_id=1,
+            outbox_id=1,
+            event_id="event",
+            watch_id="watch",
+            attempt_number=0,
+            attempted_at=timestamp,
+            status=DeliveryAttemptStatus.FAILED,
+        )
 
 
 def test_models_detach_caller_owned_json_and_event_dict_output() -> None:

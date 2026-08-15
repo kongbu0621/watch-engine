@@ -19,9 +19,13 @@ from watch_engine._time import from_iso, require_aware, to_iso, to_sortable_iso,
 from watch_engine.interfaces import TransitionPolicy
 from watch_engine.models import (
     _MAX_DELIVERY_BATCH_SIZE,
+    DeliveryAttemptDiagnostic,
+    DeliveryAttemptStatus,
     EventDraft,
     Observation,
     ObservationStatus,
+    OutboxDiagnostic,
+    OutboxStatus,
     PurgeResult,
     RunStatus,
     WatchEvent,
@@ -30,6 +34,8 @@ from watch_engine.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MAX_DIAGNOSTIC_PAGE_SIZE = 500
 
 _TIMESTAMP_SQL_COLUMNS = frozenset(
     {"e.created_at", "o.created_at", "o.next_attempt_at"}
@@ -1086,6 +1092,160 @@ class SQLiteStore:
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
 
+    def list_outbox_diagnostics(
+        self,
+        *,
+        watch_id: str | None = None,
+        status: OutboxStatus | None = None,
+        limit: int = 100,
+        after_outbox_id: int | None = None,
+    ) -> tuple[OutboxDiagnostic, ...]:
+        """Return a bounded typed page of Outbox state ordered by ``outbox_id``."""
+
+        if watch_id is not None:
+            self._validate_watch_id(watch_id)
+        if status is not None and not isinstance(status, OutboxStatus):
+            raise TypeError("status must be an OutboxStatus or None")
+        self._validate_diagnostic_page(limit, after_outbox_id, cursor="after_outbox_id")
+
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if watch_id is not None:
+            clauses.append("e.watch_id = ?")
+            parameters.append(watch_id)
+        if status is not None:
+            clauses.append("o.status = ?")
+            parameters.append(status.value)
+        if after_outbox_id is not None:
+            clauses.append("o.outbox_id > ?")
+            parameters.append(after_outbox_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT o.outbox_id, o.event_id, e.watch_id, o.status, o.attempts,
+                       o.next_attempt_at, o.locked_at, o.delivered_at, o.last_error,
+                       o.created_at, o.updated_at
+                FROM outbox o
+                JOIN events e ON e.event_id = o.event_id
+                {where}
+                ORDER BY o.outbox_id
+                LIMIT ?
+                """,  # noqa: S608 - only fixed clauses are interpolated
+                parameters,
+            ).fetchall()
+        return tuple(self._outbox_diagnostic_from_row(row) for row in rows)
+
+    def list_delivery_attempt_diagnostics(
+        self,
+        *,
+        watch_id: str | None = None,
+        event_id: str | None = None,
+        status: DeliveryAttemptStatus | None = None,
+        limit: int = 100,
+        after_attempt_id: int | None = None,
+    ) -> tuple[DeliveryAttemptDiagnostic, ...]:
+        """Return a bounded typed page of attempts ordered by ``attempt_id``."""
+
+        if watch_id is not None:
+            self._validate_watch_id(watch_id)
+        if event_id is not None:
+            _require_non_empty_string(event_id, field="event_id")
+        if status is not None and not isinstance(status, DeliveryAttemptStatus):
+            raise TypeError("status must be a DeliveryAttemptStatus or None")
+        self._validate_diagnostic_page(limit, after_attempt_id, cursor="after_attempt_id")
+
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if watch_id is not None:
+            clauses.append("e.watch_id = ?")
+            parameters.append(watch_id)
+        if event_id is not None:
+            clauses.append("a.event_id = ?")
+            parameters.append(event_id)
+        if status is not None:
+            clauses.append("a.status = ?")
+            parameters.append(status.value)
+        if after_attempt_id is not None:
+            clauses.append("a.attempt_id > ?")
+            parameters.append(after_attempt_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit)
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT a.attempt_id, a.outbox_id, a.event_id, e.watch_id,
+                       a.attempt_number, a.attempted_at, a.status, a.error
+                FROM delivery_attempts a
+                JOIN events e ON e.event_id = a.event_id
+                {where}
+                ORDER BY a.attempt_id
+                LIMIT ?
+                """,  # noqa: S608 - only fixed clauses are interpolated
+                parameters,
+            ).fetchall()
+        return tuple(self._delivery_attempt_diagnostic_from_row(row) for row in rows)
+
+    @staticmethod
+    def _validate_diagnostic_page(
+        limit: object, cursor_value: object, *, cursor: str
+    ) -> None:
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("limit must be an integer")
+        if not 1 <= limit <= _MAX_DIAGNOSTIC_PAGE_SIZE:
+            raise ValueError(
+                f"limit must be between 1 and {_MAX_DIAGNOSTIC_PAGE_SIZE}"
+            )
+        if cursor_value is not None:
+            if isinstance(cursor_value, bool) or not isinstance(cursor_value, int):
+                raise TypeError(f"{cursor} must be an integer or None")
+            if cursor_value < 0:
+                raise ValueError(f"{cursor} must not be negative")
+
+    @staticmethod
+    def _outbox_diagnostic_from_row(row: sqlite3.Row) -> OutboxDiagnostic:
+        return OutboxDiagnostic(
+            outbox_id=int(row["outbox_id"]),
+            event_id=str(row["event_id"]),
+            watch_id=str(row["watch_id"]),
+            status=OutboxStatus(row["status"]),
+            attempts=int(row["attempts"]),
+            next_attempt_at=(
+                from_iso(row["next_attempt_at"])
+                if row["next_attempt_at"] is not None
+                else None
+            ),
+            locked_at=(
+                from_iso(row["locked_at"]) if row["locked_at"] is not None else None
+            ),
+            delivered_at=(
+                from_iso(row["delivered_at"])
+                if row["delivered_at"] is not None
+                else None
+            ),
+            last_error=row["last_error"],
+            created_at=from_iso(row["created_at"]),
+            updated_at=from_iso(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _delivery_attempt_diagnostic_from_row(
+        row: sqlite3.Row,
+    ) -> DeliveryAttemptDiagnostic:
+        return DeliveryAttemptDiagnostic(
+            attempt_id=int(row["attempt_id"]),
+            outbox_id=int(row["outbox_id"]),
+            event_id=str(row["event_id"]),
+            watch_id=str(row["watch_id"]),
+            attempt_number=int(row["attempt_number"]),
+            attempted_at=from_iso(row["attempted_at"]),
+            status=DeliveryAttemptStatus(row["status"]),
+            error=row["error"],
+        )
+
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> WatchEvent:
         subject = decode_json(row["subject_json"])
@@ -1409,15 +1569,26 @@ class SQLiteStore:
         )
 
     def outbox_rows(self) -> list[dict[str, Any]]:
-        """Return diagnostic outbox snapshots without exposing a live connection."""
+        """Return the legacy raw diagnostic shape; prefer typed paged diagnostics."""
         with self._connect() as connection:
-            rows = connection.execute("SELECT * FROM outbox ORDER BY outbox_id").fetchall()
+            rows = connection.execute(
+                """
+                SELECT outbox_id, event_id, status, attempts, next_attempt_at,
+                       locked_at, delivered_at, last_error, created_at, updated_at
+                FROM outbox ORDER BY outbox_id
+                """
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def delivery_attempt_rows(self) -> list[dict[str, Any]]:
+        """Return the legacy raw diagnostic shape; prefer typed paged diagnostics."""
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM delivery_attempts ORDER BY attempt_id"
+                """
+                SELECT attempt_id, outbox_id, event_id, attempt_number,
+                       attempted_at, status, error
+                FROM delivery_attempts ORDER BY attempt_id
+                """
             ).fetchall()
         return [dict(row) for row in rows]
 

@@ -1,5 +1,7 @@
 # Contributing
 
+English | [简体中文](CONTRIBUTING.zh-CN.md)
+
 Keep the engine domain-neutral. Business scraping, product interpretation, provider-specific
 notifications, credentials, and deployment secrets belong in downstream adapters.
 
@@ -11,9 +13,17 @@ python -m pytest
 python -m ruff check .
 python -m mypy src
 python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 python -m pip_audit --local --progress-spinner=off
 ```
 
 Use synthetic fixtures. Do not include personal information, credentials, private downstream
 repository names, production URLs, database files, or complete captured responses in commits,
 issues, logs, or pull requests. Report vulnerabilities through `SECURITY.md`.
+
+When changing a repository-owned, human-facing English Markdown document in any source directory,
+update its sibling `.zh-CN.md` version in the same change. The Chinese file must contain substantive
+Chinese text, not just an English copy under a Chinese filename. Keep public API names, state values,
+commands, paths, and important engineering terms in English inside the Chinese text so they remain
+directly searchable and traceable to code.

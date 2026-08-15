@@ -11,6 +11,54 @@
 版本状态：`v0.1.0` 是最新的不可变正式版本；当前源码描述尚未发布的 `0.2.0` 候选版本，不能把
 `main` 当作 Release。固定版本与候选 wheel 的核验方式见[采用指南](docs/adoption-guide.zh-CN.md)。
 
+## 这个模块有什么用
+
+当一个程序需要反复观测某个目标、区分“可信证据”和“观测失败”、判断是否真的发生状态转换，并把
+转换事件可靠保存到下游成功接收时，可以复用 `watch-engine`。如果没有统一引擎，每个监控程序通常
+都要重复实现调度、最后可信状态、重启恢复、状态比较、事件持久化、失败重试和重复投递处理。
+
+```text
+Trigger -> Observer -> Observation -> SQLite 证据
+                         |
+                         +-- VALID -> Authority -> TransitionPolicy
+                                                   |
+                                                   v
+                                             Event + Outbox
+                                                   |
+                                                   v
+                                               EventSink
+```
+
+可复用场景包括服务健康、文件就绪、API 结果、任务完成或业务阈值监控。采用方负责定义“如何取得
+观测、状态代表什么、哪些转换值得产生事件、事件送到哪里”；`watch-engine` 负责这些领域决策外围
+可复用的控制循环和可靠性边界。
+
+| 复用判断 | 当前 0.x 的回答 |
+| --- | --- |
+| 它提供什么价值？ | 统一调度、持久证据、最后可信 Authority、确定性的转换判断、Event/Outbox 原子创建、有界重试、重启恢复和数据生命周期操作。 |
+| 采用方需要实现什么？ | `Observer`、领域 `TransitionPolicy`、可按 `event_id` 幂等的 `EventSink`，以及把它们组合成 `WatchDefinition` 的配置。 |
+| 观测不确定时会怎样？ | `DEGRADED` 和 `FAILED` 会作为诊断证据保留，但不会被偷偷解释成业务状态变化，也不会覆盖最后一个有效 Authority。 |
+| 投递保证是什么？ | 至少一次（at-least-once），不是恰好一次；下游必须让同一 `event_id` 的重复投递无害。 |
+| 需要运行什么？ | 采用方负责进程循环或 Supervisor；当前 SQLite 边界只允许每个数据库有一个本机拥有进程和一个活跃 Dispatcher。 |
+| 明确不包含什么？ | 特定产品的抓取/解析、业务状态定义、通知 Provider 集成、Daemon/进程管理、分布式协调、多租户管理和 Web UI。 |
+
+适合复用这个模块的情况：
+
+- 多个监控程序原本会重复实现同一套调度、状态、持久化和重试机制；
+- 观测失败或证据不完整必须与“已经确认发生状态变化”严格区分；
+- 权威状态和产生的事件必须跨进程重启保存，并能够审计；
+- 后续投递重试必须复用同一个稳定事件身份；
+- 新领域应该通过 `Observer`、`TransitionPolicy`、`EventSink` 接入，而不是继续向共享 Core
+  添加特定产品分支。
+
+不适合使用这个模块的情况：
+
+- 只是一次性检查，内存结果丢失也没有影响；
+- 直接进行一次尽力而为的回调已经足够，不需要持久状态或重试证据；
+- 完全不能接受重复投递，并且下游无法按 `event_id` 去重；
+- 需要多个拥有进程并发、分布式租约、高可用或共享网络数据库；这些超出当前 SQLite 设计；
+- 希望库直接抓取某个网站、解释某个产品/业务状态、管理收件人/模板，或内置特定通知 Provider。
+
 ## 核心概念
 
 - `WatchDefinition` 以稳定的 `watch_id` 组合一个 `Trigger`、`Observer`、
@@ -90,10 +138,10 @@ definition = WatchDefinition(
     transition_policy=HealthTransitions(),
 )
 
-# One observation, independent of scheduling:
+# 执行一次 Observation，不依赖 Trigger 调度：
 result = WatchRuntime(store).run_once(definition)
 
-# Deliver all currently due events. Run this repeatedly in a worker/process loop.
+# 投递当前所有到期 Event；在 Worker/进程循环中重复调用：
 delivery_results = OutboxDispatcher(store, SummarySink()).dispatch_ready()
 ```
 
@@ -157,6 +205,11 @@ View、Trigger 或 Index；业务数据和个人信息必须使用独立存储�
 默认值为 100。
 
 `get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
+`list_outbox_diagnostics()` 与 `list_delivery_attempt_diagnostics()` 分页返回 typed
+`OutboxDiagnostic` 和 `DeliveryAttemptDiagnostic`，支持按 Watch、状态和 Event 过滤，并使用整数
+Cursor。每页默认 100 条、上限 500 条，长时间运行的监控不必把完整投递历史一次性读入内存。
+旧的 raw-row Helper 为 0.x 兼容性继续保留；新采用方应使用 typed API，不依赖 SQLite 列名。
+
 模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
 不是深只读对象。应把它们当作快照，不要修改或跨并发任务共享；对这些内存容器的修改不会回写已经
 持久化的 Observation、Authority 或 Event。
@@ -179,6 +232,9 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 python -m pip_audit --local --progress-spinner=off
 ```
 

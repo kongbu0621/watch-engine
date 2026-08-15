@@ -8,10 +8,14 @@ import pytest
 
 from tests.helpers import SequenceObserver, StateChangePolicy
 from watch_engine import (
+    DeliveryAttemptDiagnostic,
+    DeliveryAttemptStatus,
     DeliveryConfig,
     ManualTrigger,
     Observation,
+    OutboxDiagnostic,
     OutboxDispatcher,
+    OutboxStatus,
     RetryPolicy,
     SQLiteStore,
     WatchDefinition,
@@ -90,6 +94,84 @@ def make_pending_event(store: SQLiteStore) -> WatchEvent:
     runtime.run_once(definition)
     result = runtime.run_once(definition)
     return result.events[0]
+
+
+def test_typed_outbox_diagnostics_are_bounded_filterable_and_pageable(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    event = make_pending_event(store)
+
+    page = store.list_outbox_diagnostics(
+        watch_id="delivery-watch", status=OutboxStatus.PENDING, limit=1
+    )
+
+    assert len(page) == 1
+    diagnostic = page[0]
+    assert isinstance(diagnostic, OutboxDiagnostic)
+    assert diagnostic.event_id == event.event_id
+    assert diagnostic.watch_id == "delivery-watch"
+    assert diagnostic.status is OutboxStatus.PENDING
+    assert diagnostic.attempts == 0
+    assert diagnostic.created_at == NOW
+    assert store.list_outbox_diagnostics(
+        after_outbox_id=diagnostic.outbox_id
+    ) == ()
+    assert store.list_outbox_diagnostics(watch_id="other-watch") == ()
+
+
+def test_typed_delivery_attempt_diagnostics_expose_dead_state_without_table_access(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    event = make_pending_event(store)
+    retry = RetryPolicy(max_attempts=1)
+    OutboxDispatcher(
+        store,
+        RecordingSink(failures=1),
+        config=DeliveryConfig(retry=retry),
+        clock=lambda: NOW,
+    ).dispatch_ready()
+
+    outbox = store.list_outbox_diagnostics(
+        watch_id="delivery-watch", status=OutboxStatus.DEAD
+    )
+    attempts = store.list_delivery_attempt_diagnostics(
+        watch_id="delivery-watch",
+        event_id=event.event_id,
+        status=DeliveryAttemptStatus.FAILED,
+    )
+
+    assert len(outbox) == 1
+    assert outbox[0].status is OutboxStatus.DEAD
+    assert outbox[0].attempts == 1
+    assert len(attempts) == 1
+    assert isinstance(attempts[0], DeliveryAttemptDiagnostic)
+    assert attempts[0].attempt_number == 1
+    assert attempts[0].status is DeliveryAttemptStatus.FAILED
+    assert attempts[0].attempted_at == NOW
+
+
+@pytest.mark.parametrize("invalid", [True, 0, 501])
+def test_typed_diagnostic_page_limit_is_strictly_bounded(
+    tmp_path: Path, invalid: object
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    expected = TypeError if isinstance(invalid, bool) else ValueError
+    with pytest.raises(expected):
+        store.list_outbox_diagnostics(limit=invalid)  # type: ignore[arg-type]
+
+
+def test_typed_diagnostic_filters_reject_untyped_status_and_invalid_cursor(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "watch.db")
+    with pytest.raises(TypeError, match="OutboxStatus"):
+        store.list_outbox_diagnostics(status="DEAD")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="DeliveryAttemptStatus"):
+        store.list_delivery_attempt_diagnostics(status="FAILED")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="after_attempt_id"):
+        store.list_delivery_attempt_diagnostics(after_attempt_id=-1)
 
 
 def test_delivery_failure_survives_dispatcher_restart(tmp_path: Path) -> None:
