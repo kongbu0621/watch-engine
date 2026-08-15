@@ -728,6 +728,23 @@ def test_purge_removes_only_terminal_history_and_preserves_authority(tmp_path: P
     assert authority is not None and authority.state == "B"
 
 
+def test_purge_compares_exact_and_fractional_seconds_chronologically(
+    tmp_path: Path,
+) -> None:
+    created_at = NOW + timedelta(microseconds=500_000)
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: created_at)
+    store.record_observation(
+        "lifecycle",
+        Observation.degraded(observed_at=created_at, error="incomplete evidence"),
+        StateChangePolicy(),
+        now=created_at,
+    )
+
+    assert store.purge_before(NOW).observations_deleted == 0
+    assert len(store.list_observations("lifecycle")) == 1
+    assert store.purge_before(created_at + timedelta(microseconds=1)).observations_deleted == 1
+
+
 def test_purge_preserves_undelivered_events(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     make_event(store)

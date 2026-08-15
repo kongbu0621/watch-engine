@@ -8,6 +8,9 @@
 它解决轮询式和事件驱动式监视器共有的可靠性问题。它不负责抓取网站，不理解 `AVAILABLE`
 之类的领域状态，不向特定服务商发送消息，也不提供分布式调度器或 Web 管理界面。
 
+版本状态：`v0.1.0` 是最新的不可变正式版本；当前源码描述尚未发布的 `0.2.0` 候选版本，不能把
+`main` 当作 Release。固定版本与候选 wheel 的核验方式见[采用指南](docs/adoption-guide.zh-CN.md)。
+
 ## 核心概念
 
 - `WatchDefinition` 以稳定的 `watch_id` 组合一个 `Trigger`、`Observer`、
@@ -126,7 +129,7 @@ I/O、修改 SQLite 之外的状态或产生无法回滚的副作用。这些操
 在 EventSink 接受事件之后、SQLite 记录成功之前退出；下一个进程会再次发送具有同一
 `event_id` 的已存储事件。EventSink 必须按 `event_id` 去重。失败的投递尝试使用可配置且有上限的
 指数退避，并能在重启后继续。重试耗尽的事件会以 `DEAD` 状态保留，供诊断使用。
-v0.1 的 SQLite 后端只支持一个本机拥有进程和一个活跃 Dispatcher。确认时会校验已完成尝试次数，
+当前 0.x 的 SQLite 后端只支持一个本机拥有进程和一个活跃 Dispatcher。确认时会校验已完成尝试次数，
 但它不是租约或唯一 claim token；旧 Dispatcher 与替代 Dispatcher 不得重叠运行。
 
 Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策略重试。尝试次数耗尽后，运行时会
@@ -138,7 +141,9 @@ Observer 抛出的异常会在一次运行内按照该 Watch 的有界重试策�
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json)；使用方应依据该契约，而不是导入
 内部数据库模型。
 
-每个 JSON 字段编码后上限为 1 MiB，标识符/事件元数据标量和错误字段上限为 2,048 字符。数据保留由调用方明确控制：`purge_before(cutoff)` 只删除
+Runtime 新建模型的每个 JSON 字段编码后上限为 1 MiB，标识符/事件元数据标量和错误字段上限为
+2,048 字符；这些实现边界不会收紧已经发布的 Event v1 消费契约。数据保留由调用方明确控制：
+`purge_before(cutoff)` 只删除
 旧的终态（`DELIVERED`/`DEAD`）事件历史和非 Authority 观测，`delete_watch()` 默认拒绝删除仍有
 未投递事件的 Watch，只有实际布尔值 `True` 才能覆盖该保护；`compact_storage()` 应在其他数据库
 使用者停止后执行 checkpoint 和 vacuum。
@@ -179,7 +184,7 @@ python -m pip_audit . --progress-spinner=off
 
 测试套件完全在本地运行，不需要网络或第三方服务。
 
-## v0.1 边界
+## 当前 0.x 边界
 
 运行时有意限定为单节点，并在 Observer/EventSink 边界采用同步调用。SQLite 负责协调本地事务，
 但它不是分布式锁。
@@ -195,7 +200,7 @@ Observer，该 Observer 必须自行保证线程安全。时间戳相等时采�
 Authority 继续保持权威，之后完成的 Observation 仅作为证据。时间戳必须包含时区信息，并具有足够
 精度，以便对 Observer 实际取得的证据进行排序。
 
-Trigger 适配器是异步的，但 v0.1 不包含 daemon CLI、进程监督器、分布式调度器、动态插件加载器、
+Trigger 适配器是异步的，但当前 0.x 不包含 daemon CLI、进程监督器、分布式调度器、动态插件加载器、
 PostgreSQL、Redis 或消息代理。
 
 已实现的 Trigger 包括带抖动的时间间隔、cron 调度和进程内手动请求。以后可以增加外部事件、文件

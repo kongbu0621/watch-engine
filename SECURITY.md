@@ -4,7 +4,7 @@ English | [简体中文](SECURITY.zh-CN.md)
 
 ## Supported version
 
-Security fixes are provided for the latest released `0.1.x` version. Users should upgrade to the
+Security fixes are provided for the latest released `0.x` version. Users should upgrade to the
 latest patch release before reporting a defect already fixed on `main`.
 
 ## Reporting a vulnerability

@@ -21,17 +21,15 @@
     "event_id": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2048,
       "description": "Stable idempotency key reused for every delivery attempt of this event."
     },
-    "watch_id": { "type": "string", "minLength": 1, "maxLength": 2048 },
-    "event_type": { "type": "string", "minLength": 1, "maxLength": 2048 },
-    "severity": { "type": "string", "minLength": 1, "maxLength": 2048 },
+    "watch_id": { "type": "string", "minLength": 1 },
+    "event_type": { "type": "string", "minLength": 1 },
+    "severity": { "type": "string", "minLength": 1 },
     "occurred_at": { "type": "string", "format": "date-time" },
     "dedupe_key": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 2048,
       "description": "Domain correlation key; it is not globally unique across event occurrences."
     },
     "subject": { "type": "object" },

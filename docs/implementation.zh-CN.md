@@ -2,18 +2,18 @@
 
 ## 1. 文档目的
 
-本文描述 `watch-engine` v0.1 当前版本如何在代码、数据、配置、测试、CI 和发布层面实际落地，并建立“模块需求 → 架构设计 → 代码实现”的可追踪关系。
+本文描述 `watch-engine` 当前 0.x 版本线如何在代码、数据、配置、测试、CI 和发布层面实际落地，并建立“模块需求 → 架构设计 → 代码实现”的可追踪关系。
 
 本文不是需求文档，也不是抽象架构说明：
 
 - “做什么、为什么做、如何验收”见 [模块需求说明](module-requirements.zh-CN.md)；
 - “系统怎样分层、关键设计为何成立”见 [架构设计](architecture.zh-CN.md)；
 - “其他工程怎样接入”见 [下游采用指南](adoption-guide.zh-CN.md)；
-- 本文回答“v0.1 在哪些文件中、使用哪些类和数据结构、以什么配置和执行步骤具体实现”。
+- 本文回答“当前 0.x 在哪些文件中、使用哪些类和数据结构、以什么配置和执行步骤具体实现”。
 
 ## 2. 实现基线
 
-| 项目 | v0.1 落地选择 |
+| 项目 | 当前 0.x 落地选择 |
 |---|---|
 | 语言 | Python 3.11+ |
 | 包名 | `watch-engine` |
@@ -174,6 +174,11 @@ watch-engine/
 不受控内存批次。Dispatcher 会继续在后续 `dispatch_ready()` 调用中领取剩余到期事件。Observer
 重试与 Event 投递重试是两套独立配置，不得混用。
 
+`claim_due()` 不能直接比较历史 ISO 8601 文本：Python 对整秒会写成 `...00Z`，对非整秒会写成
+`...00.500000Z`，而 SQLite 文本排序会错误地把前者放在后者之后。`_sortable_timestamp_sql()` 只允许
+固定的内部列名，并在 SQL 比较时把无小数的旧值规范化为 `.000000Z`；查询参数由
+`to_sortable_iso()` 转为 UTC 六位小数。这样既修复时间顺序，又不需要重写既有数据库。
+
 ## 6. Runtime 实现
 
 实现位置：`src/watch_engine/runtime.py`
@@ -280,7 +285,7 @@ Python 连接参数：
 - `row_factory=sqlite3.Row`。
 
 连接会验证 WAL 与 `secure_delete` 的实际返回值，不支持时 fail-fast，而不是假定 PRAGMA 已生效。
-v0.1 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
+当前 0.x 的数据库 Schema 版本为 `1`；`schema_meta` 必须恰好一行。版本不匹配或元数据出现多行时
 初始化直接失败，不进行静默迁移或任意选择第一行。建表前先检查已有数据库：存在用户表但没有
 `schema_meta` 时拒绝接管；即使碰巧存在版本值为 `1` 的同名表，也必须完整匹配 v1 用户定义对象
 集合、列名、类型、非空、默认值、主键、Foreign Key、状态 CHECK 以及 Outbox `event_id` 唯一约束，
@@ -380,6 +385,8 @@ v1 数据库直接复用，不重复运行 `CREATE IF NOT EXISTS`。
 拒绝删除仍有未投递事件的 Watch；显式传入 `allow_undelivered=True` 才允许覆盖此保护。两个操作
 均在单个 `BEGIN IMMEDIATE` 事务中完成，任一 SQL 失败时整体回滚。
 `allow_undelivered` 必须是实际 `bool`；字符串 `"false"`、整数 `1` 等真值不得绕过破坏性保护。
+截止时间比较与 `claim_due()` 使用同一套定宽 UTC 规范化，因此整秒截止点不会误删更新的微秒记录，
+也不会漏领已经到期的旧格式记录。
 
 ## 9. Outbox 投递实现
 
@@ -422,7 +429,7 @@ stateDiagram-v2
 成功和失败确认都必须同时匹配 `outbox_id`、`event_id`、已完成尝试计数 `attempts` 和
 `DELIVERING` 状态；事件错配、尝试计数错配或已经不活跃的 claim 不得更新 Outbox，也不得生成
 投递审计行。`attempts` 不是唯一 claim token：在违反单所有者基线、让旧 Dispatcher 与恢复后的
-新 Dispatcher 重叠运行时，重新领取且尚未完成的新 claim 可能具有相同计数，v0.1 不承诺区分它们。
+新 Dispatcher 重叠运行时，重新领取且尚未完成的新 claim 可能具有相同计数，当前 0.x 不承诺区分它们。
 若领取提交后发生 Clock、行恢复、SQLite 确认异常或进程级中断，当前调用不掩盖异常，但会在
 `finally` 中清除本实例的恢复标记；
 同一 Dispatcher 下一次调用会先恢复遗留 `DELIVERING`，不要求重启进程或重建对象。Sink 可能已
@@ -434,7 +441,7 @@ stateDiagram-v2
 
 落地要求：生产 EventSink 必须在外部服务或自身持久存储中按 `event_id` 幂等。进程内集合只能用于示例和测试。
 
-v0.1 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
+当前 0.x 没有 Dispatcher 租约、进程身份或锁超时判断，`recover_in_flight()` 会恢复数据库中全部
 `DELIVERING`。因此同一 SQLite 数据库只能有一个本机监控进程，Runner 与 Dispatcher 均由该进程
 持有；进程监督器必须保证旧实例退出后再启动替代实例。增加目标时使用同一进程内串行调度。
 所有可选时间与投递配置只把 `None` 解释为“未提供”；`0`、空容器等错误类型不会静默降级为当前
@@ -469,7 +476,7 @@ Observation 新旧判断只使用 `observed_at`，不使用数据库插入时间
 
 ## 11. 运行组合方案
 
-v0.1 不提供通用 CLI。下游入口程序负责组合：
+当前 0.x 不提供通用 CLI。下游入口程序负责组合：
 
 ```python
 store = SQLiteStore(database_path)
@@ -525,7 +532,7 @@ Runtime、Storage 和 Dispatcher 使用标准 `logging`，只附带异常类型�
 
 ### 13.3 DEAD 处理
 
-v0.1 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态，并按保留策略调用 `purge_before()`；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
+当前 0.x 将耗尽重试的事件保留为 `DEAD`，但不提供管理 UI 或自动重放命令。运维必须能够查询诊断状态，并按保留策略调用 `purge_before()`；未来若多个下游需要安全重放，再设计公开管理接口，不能要求下游直接修改 SQLite 表。
 
 ## 14. 测试落地方案
 
@@ -603,8 +610,9 @@ CI 还必须：
 4. 离开仓库工作目录后导入 `watch_engine`；
 5. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
 
-这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试。v0.1.1
-还必须验证 `load_watch_event_schema()` 能从安装后的 wheel 读取与仓库根 Schema 相同的内容。
+这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试。当前未发布的
+`0.2.0` 候选版本还必须验证 `load_watch_event_schema()` 能从安装后的 wheel 读取与仓库根 Schema
+相同的内容。
 
 ## 16. 本地验证命令
 
@@ -632,14 +640,16 @@ python -m build
   `site-packages` 导入：通过；
 - wheel 内容核对：不包含仓库级 `schemas/watch-event-v1.json`。
 
-最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。v0.1.1 增加 package resource 与一致性
-测试；这不会改变已经冻结的 v0.1.0 产物。
+最后一项是 v0.1.0 的已知分发边界，而不是未验证状态。`0.2.0` 候选版本增加 package resource 与
+一致性测试；这不会改变已经冻结的 v0.1.0 产物。
 
 ## 17. 版本与发布方案
 
 ### 17.1 当前版本来源
 
-`pyproject.toml` 中的 `project.version = "0.1.1"` 是下一维护版本的 Python 包版本来源。
+`pyproject.toml` 中的 `project.version = "0.2.0"` 是当前未发布候选版本的 Python 包版本来源。
+相对 `v0.1.0`，Public API 的输入与资源边界有意收紧；在 SemVer 的 0.x 阶段，这类不兼容变化提升
+Minor，而不是伪装成 Patch。该版本号不代表对应 Tag/Release 已经存在。
 
 ### 17.2 已发布基线
 
@@ -651,9 +661,9 @@ python -m build
 - Tag 指向提交 `9752398`；
 - Release 非 Draft、非 Prerelease。
 
-本 PR 的四份正式中文文档发生在该 Tag 之后，所以不会反向进入已经冻结的 v0.1.0 产物。不得移动或
-覆盖 `v0.1.0` Tag。后续若真实采用暴露代码、打包或契约修复，应更新包版本并创建新的 Release；
-只有文档变化时，也必须明确它描述的是已发布代码还是未来目标。
+当前源码中的正式中文文档发生在该 Tag 之后，所以不会反向进入已经冻结的 v0.1.0 产物。不得移动或
+覆盖 `v0.1.0` Tag。`0.2.0` 仍是未发布候选；只有合并、CI、制品和隔离安装均通过后，才能创建新的
+`v0.2.0` Tag/Release。只有文档变化时，也必须明确它描述的是已发布代码还是未来目标。
 
 ### 17.3 包索引发布安全
 
@@ -678,38 +688,32 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | NFR-03 typed 诊断 | Persistence Public API | `WatchStatus`、`get_watch_status` | 已实现并测试 |
 | 独立采用验证 | 匿名下游工程 | Public API + Schema | 已完成，证据在下游私有记录 |
 | wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
-| Schema wheel 分发 | 打包边界 | v0.1.1 wheel 包含 package resource | 已实现并测试 |
+| Schema wheel 分发 | 打包边界 | 0.2.0 候选 wheel 包含 package resource | 已实现并测试，尚未发布 |
 | Git Tag / Release | Release 流程 | GitHub `v0.1.0` | 已完成（2026-08-10） |
 
 “已实现”表示代码落点存在；最终完成仍以自动化测试、CI 和真实下游验证为准。
 
-## 19. 当前缺口与下一步
+## 19. 当前状态与下一步
 
-### P0：合并前文档闭环
-
-- 确认三层文档和采用指南互相链接；
-- 检查文档示例与 Public API；
-- 确认需求、架构、实现、采用指南和代码契约同步更新。
-
-### P1：独立采用验证
+### 已完成：独立采用验证
 
 一个匿名独立下游已实现领域 Observer、TransitionPolicy 与 EventSink，并验证固定版本安装、失败证据、Authority、Event、Outbox、重试与重启。业务细节和部署证据不进入公开仓库。
 
-### P2：真实采用后的维护版本
+### 当前发布门禁：v0.2.0
 
-维护版本发布前：
+`0.2.0` 目前只代表源码候选版本。发布前必须：
 
 - 修复确认的通用缺口；
 - 重跑 CI；
 - 构建 wheel；
 - 在全新虚拟环境安装验证；
-- 按 Semantic Versioning 更新版本号；
-- 创建新 Tag 和 Release Notes；
+- 核对 Event v1 与 `v0.1.0` 发布基线仍兼容；
+- 创建不可移动的 `v0.2.0` Tag 和 Release Notes；
 - 永不移动已经发布的 `v0.1.0` Tag。
 
 ### 暂不推进
 
-除非真实下游形成明确共性需求，否则不进入 v0.1：
+除非真实下游形成明确共性需求，否则不进入当前 0.x：
 
 - 分布式协调；
 - PostgreSQL、Redis、Kafka；
@@ -719,7 +723,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 - 特定通知供应商；
 - 通用 daemon CLI。
 
-## 20. v0.1.1 隐私与安全加固落地
+## 20. v0.2.0 候选版本的隐私、安全与兼容性加固落地
 
 | 风险 | 代码落点 | 验收 |
 |---|---|---|
@@ -734,6 +738,9 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | 超深或可变 JSON 绕过模型不变性 | `_json.MAX_JSON_NESTING`、`copy_json` | 100 层边界、循环引用与外部修改测试 |
 | 错配或过期 Outbox 确认 | claim 的 event/attempt 条件更新 | 伪造 claim 不改变状态、不写审计行 |
 | Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |
+| Event v1 被实现边界意外收紧 | 根与 wheel 的 `watch-event-v1.json` | 与 `v0.1.0` 发布基线保持相同合法值集合，并验证超长旧合法标识符 |
+| ISO 时间文本混合精度导致顺序反转 | `_sortable_timestamp_sql`、`to_sortable_iso` | 到期领取与清理覆盖整秒/微秒边界及旧数据库文本 |
+| 已知存在漏洞的开发测试依赖 | `pyproject.toml` 的 `pytest>=9.0.3,<10` | 使用安全版本重跑完整测试并执行 `pip-audit` |
 | 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
 | 无界投递批量 | `DeliveryConfig` 与 `claim_due` 的 500 条上限 | 501 在数据库操作前拒绝 |
 

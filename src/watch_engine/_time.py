@@ -19,5 +19,15 @@ def to_iso(value: datetime) -> str:
     return require_aware(value, field="datetime").isoformat().replace("+00:00", "Z")
 
 
+def to_sortable_iso(value: datetime) -> str:
+    """Return fixed-width UTC text for lexicographic SQLite comparisons."""
+
+    return (
+        require_aware(value, field="datetime")
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def from_iso(value: str) -> datetime:
     return require_aware(datetime.fromisoformat(value.replace("Z", "+00:00")), field="datetime")

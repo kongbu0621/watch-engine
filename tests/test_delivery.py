@@ -274,6 +274,30 @@ def test_maximum_claim_batch_remains_within_sqlite_variable_limit(
     assert len(claimed) == 500
 
 
+def test_claim_due_orders_exact_and_fractional_seconds_chronologically(
+    tmp_path: Path,
+) -> None:
+    due_at = NOW + timedelta(microseconds=500_000)
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: due_at)
+    make_pending_event(store)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE outbox SET next_attempt_at = ?, updated_at = ?",
+            (due_at.isoformat().replace("+00:00", "Z"),) * 2,
+        )
+
+    assert store.claim_due(now=NOW) == []
+    assert len(store.claim_due(now=due_at)) == 1
+
+
+def test_claim_due_handles_legacy_exact_second_timestamp_text(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
+    make_pending_event(store)
+
+    assert store.outbox_rows()[0]["next_attempt_at"] == "2025-01-01T12:00:00Z"
+    assert store.claim_due(now=NOW + timedelta(microseconds=1))
+
+
 def test_falsey_wrong_typed_time_is_not_replaced_by_clock(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "watch.db", clock=lambda: NOW)
     with pytest.raises(TypeError, match="datetime"):

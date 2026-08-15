@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -59,3 +60,25 @@ def test_public_docs_do_not_contain_operational_identifiers() -> None:
             assert pattern.search(content) is None, (
                 f"{label} leaked in {markdown.relative_to(ROOT)}"
             )
+
+
+def test_candidate_version_and_release_status_are_consistent() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    version = project["version"]
+    assert version == "0.2.0"
+
+    readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    adoption = (ROOT / "docs/adoption-guide.zh-CN.md").read_text(encoding="utf-8")
+    implementation = (ROOT / "docs/implementation.zh-CN.md").read_text(encoding="utf-8")
+    architecture = (ROOT / "docs/architecture.zh-CN.md").read_text(encoding="utf-8")
+
+    for document in (readme, adoption, implementation):
+        assert version in document
+        assert "未发布" in document or "尚未发布" in document
+        assert "v0.1.0" in document
+
+    assert f"@v{version}" in adoption
+    assert "git+https://github.com/kongbu0621/watch-engine.git@v0.1.0" not in adoption
+    assert "load_watch_event_schema()" in architecture
+    assert "Event v1" in architecture
+    assert "v0.1.0" in architecture

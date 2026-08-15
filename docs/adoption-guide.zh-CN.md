@@ -34,10 +34,26 @@
 
 ## 3. 安装
 
-开发阶段可以从固定 Git Tag 安装：
+版本状态必须先区分清楚：
+
+| 版本 | 状态 | 本指南适用性 |
+|---|---|---|
+| `v0.1.0` | 已发布、不可变 | 只使用该 Tag 内随附的旧版文档与 API |
+| `0.2.0` | 当前源码中的未发布候选版本 | 本指南描述的 Public API 与 wheel 内置 Schema |
+
+需要当前能力的生产采用者应等待维护者创建并核验 `v0.2.0` Tag/Release。Tag 存在后，固定安装命令为：
 
 ```bash
-python -m pip install "watch-engine @ git+https://github.com/kongbu0621/watch-engine.git@v0.1.0"
+git ls-remote --exit-code --tags https://github.com/kongbu0621/watch-engine.git refs/tags/v0.2.0
+python -m pip install "watch-engine @ git+https://github.com/kongbu0621/watch-engine.git@v0.2.0"
+```
+
+第一条命令尚未成功时，不得执行第二条，也不得把 `main` 当作发布版本。仅进行当前候选版本评审时，
+应在可信源码检出中构建本地 wheel，再从 `dist/watch_engine-0.2.0-py3-none-any.whl` 安装到隔离环境：
+
+```bash
+python -m build
+python -m pip install dist/watch_engine-0.2.0-py3-none-any.whl
 ```
 
 仓库本地开发：
@@ -49,7 +65,7 @@ python -m ruff check .
 python -m mypy src
 ```
 
-下游生产环境应固定明确版本，不直接跟随 `main`。
+下游生产环境应固定已经存在且核验过的明确版本，不直接跟随 `main`，也不使用未发布候选版本。
 
 在维护者完成 PyPI 名称保留并发布可验证产物前，不要执行无来源约束的
 `pip install watch-engine`。应使用受信任仓库的精确 Tag/Commit，并在生产构建中校验提交或制品摘要，
@@ -240,7 +256,7 @@ runner = WatchRunner(runtime)
 result = asyncio.run(runner.run_next(definition))
 ```
 
-下游可以在自己的应用循环中反复调用，但不得假设引擎 v0.1 自带 daemon 或 systemd 配置。
+下游可以在自己的应用循环中反复调用，但不得假设引擎当前 0.x 自带 daemon 或 systemd 配置。
 如果代码本来已经运行在 asyncio Event Loop 中，应在 `async def` 内直接 `await`，不要再次调用
 `asyncio.run()`。
 
@@ -253,7 +269,7 @@ dispatcher = OutboxDispatcher(store, NotificationSink(client))
 delivery_results = dispatcher.dispatch_ready()
 ```
 
-v0.1 的部署基线是：一个 SQLite 数据库只由一个本机监控进程拥有，Runtime 与 Dispatcher 都在
+当前 0.x 的部署基线是：一个 SQLite 数据库只由一个本机监控进程拥有，Runtime 与 Dispatcher 都在
 该进程内运行。增加监控目标时，优先在同一进程内串行执行，不通过增加进程提高吞吐。只有未来出现
 大量独立目标或分布式部署等明确需求时，才重新设计租约、并发和存储架构。新进程只能在旧进程完全
 退出后启动，因为新 Dispatcher 会把遗留 `DELIVERING` 视为上一个投递进程已经中断。
@@ -331,8 +347,10 @@ your-monitor/
 
 ## 13. 跨工程事件消费
 
-当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。`v0.1.1` 起可通过
-`load_watch_event_schema()` 读取 wheel 内置副本，也可从同版本 Release Tag 获取并随消费者固定保存。
+当事件离开 Python 进程或被其他模块消费时，应按固定版本的 Schema 验证。已发布的 `v0.1.0`
+wheel 不包含 Schema resource；固定在该版本的消费者应从 `v0.1.0` Tag 保存根 Schema。当前未发布的
+`0.2.0` 候选版本可通过 `load_watch_event_schema()` 读取 wheel 内置副本；只有 `v0.2.0` Tag/Release
+实际存在后，生产消费者才可依赖该能力或从同版本 Tag 获取 Schema。
 
 验证，而不是：
 
@@ -400,9 +418,9 @@ watch-engine SQLite 文件必须保持引擎独占。不要在其中添加业务
 
 Semantic Versioning 解释：
 
-- Patch：兼容性修复；
-- Minor：向后兼容能力；
-- Major：Public API 的破坏性变化。
+- 在 `0.x` 阶段，Patch 只用于兼容性修复；有意且有迁移说明的 Public API 不兼容变化提升 Minor；
+- 达到 `1.0.0` 后，Patch、Minor、Major 分别表示兼容修复、向后兼容能力和破坏性变化；
+- 不论包版本如何变化，已经发布的同一 Event Schema 版本都不得收紧既有合法值。
 
 事件 Schema 独立带版本，不能只依据 Python 包版本推断消息格式。
 
