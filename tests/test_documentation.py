@@ -25,6 +25,65 @@ def test_required_document_layers_exist_and_are_discoverable() -> None:
         assert f"({name})" in chinese_readme
 
 
+def test_every_english_markdown_document_has_a_linked_chinese_version() -> None:
+    english_documents = tuple(
+        path
+        for path in MARKDOWN_FILES
+        if not path.name.endswith(".zh-CN.md")
+    )
+    assert english_documents
+
+    for english in english_documents:
+        chinese = english.with_name(f"{english.stem}.zh-CN.md")
+        assert chinese.is_file(), f"missing Chinese version for {english.relative_to(ROOT)}"
+
+        english_content = english.read_text(encoding="utf-8")
+        chinese_content = chinese.read_text(encoding="utf-8")
+        assert f"]({chinese.name})" in english_content
+        assert f"[English]({english.name})" in chinese_content
+
+
+def test_chinese_repository_guidance_preserves_key_english_terms() -> None:
+    chinese_guidance = (ROOT / "AGENTS.zh-CN.md").read_text(encoding="utf-8")
+    for term in (
+        "Observer",
+        "TransitionPolicy",
+        "Trigger",
+        "EventSink",
+        "Authority",
+        "Observation",
+        "Outbox",
+        "at-least-once",
+    ):
+        assert term in chinese_guidance
+
+
+def test_chinese_documents_retain_searchable_english_terms() -> None:
+    english_term = re.compile(r"[A-Za-z][A-Za-z0-9_.-]+")
+    chinese_documents = tuple(
+        path for path in MARKDOWN_FILES if path.name.endswith(".zh-CN.md")
+    )
+    assert chinese_documents
+    for document in chinese_documents:
+        content = document.read_text(encoding="utf-8")
+        assert english_term.search(content), (
+            f"Chinese document lost all English terminology: {document.relative_to(ROOT)}"
+        )
+
+
+def test_sdist_manifest_keeps_chinese_counterparts_of_packaged_documents() -> None:
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    for english in (
+        "README.md",
+        "SECURITY.md",
+        "DATA-GOVERNANCE.md",
+        "CONTRIBUTING.md",
+    ):
+        chinese = f"{Path(english).stem}.zh-CN.md"
+        assert f"include {english}" in manifest
+        assert f"include {chinese}" in manifest
+
+
 def test_readmes_explain_purpose_and_reuse_decision_up_front() -> None:
     english = (ROOT / "README.md").read_text(encoding="utf-8")
     chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
