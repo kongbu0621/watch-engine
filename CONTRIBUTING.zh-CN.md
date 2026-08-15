@@ -18,7 +18,7 @@ python -m pip_audit --local --progress-spinner=off
 
 测试数据必须为 Synthetic Fixture（合成测试数据）。不得在 Commit、Issue、Log 或 Pull Request 中
 包含 Personal Information、Credential、私有下游仓库名、Production URL、Database File 或完整抓取
-响应。安全漏洞应通过 `SECURITY.zh-CN.md` 所述的私有渠道报告。
+响应。安全漏洞应通过[安全策略](SECURITY.zh-CN.md)所述的私有渠道报告。
 
 修改面向人的英文 Markdown 文档时，必须在同一变更中同步修改同目录的 `.zh-CN.md` 中文版本。
 中文正文应保留 Public API 名、状态值、Command、Path 和关键英文工程术语，使其可以直接搜索并
