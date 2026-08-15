@@ -3,11 +3,15 @@
 from watch_engine.delivery import OutboxDispatcher
 from watch_engine.interfaces import EventSink, Observer, TransitionPolicy, Trigger
 from watch_engine.models import (
+    DeliveryAttemptDiagnostic,
+    DeliveryAttemptStatus,
     DeliveryConfig,
     DeliveryResult,
     EventDraft,
     Observation,
     ObservationStatus,
+    OutboxDiagnostic,
+    OutboxStatus,
     PurgeResult,
     RetryPolicy,
     RunResult,
@@ -23,6 +27,8 @@ from watch_engine.triggers import CronTrigger, IntervalTrigger, ManualTrigger
 __all__ = [
     "CronTrigger",
     "DeliveryConfig",
+    "DeliveryAttemptDiagnostic",
+    "DeliveryAttemptStatus",
     "DeliveryResult",
     "EventDraft",
     "EventSink",
@@ -32,6 +38,8 @@ __all__ = [
     "ObservationStatus",
     "Observer",
     "OutboxDispatcher",
+    "OutboxDiagnostic",
+    "OutboxStatus",
     "PurgeResult",
     "RetryPolicy",
     "RunStatus",

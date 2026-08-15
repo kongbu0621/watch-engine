@@ -13,6 +13,8 @@ python -m pytest
 python -m ruff check .
 python -m mypy src
 python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 python -m pip_audit --local --progress-spinner=off
 ```
 

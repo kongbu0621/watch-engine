@@ -344,6 +344,31 @@ your-monitor/
 7. 同一事件重复投递被 Sink 幂等处理。
 8. `get_watch_status()` 能在成功和错误运行后返回 typed 诊断，业务日志不得直接输出含调用方字段的
    整个诊断对象。
+9. `list_outbox_diagnostics()` 能查询 `DEAD`、`RETRY` 等 Outbox 状态；
+   `list_delivery_attempt_diagnostics()` 能按 Watch、Event 和 Attempt 状态查询失败证据。采用方必须
+   使用 `limit` 与返回的整数 ID 作为下一页 Cursor，不得直接读取 SQLite 内部表或一次性加载全部
+   历史。
+
+```python
+from watch_engine import DeliveryAttemptStatus, OutboxStatus
+
+dead_page = store.list_outbox_diagnostics(
+    watch_id="example-health",
+    status=OutboxStatus.DEAD,
+    limit=100,
+)
+if dead_page:
+    next_outbox_cursor = dead_page[-1].outbox_id
+
+failed_attempts = store.list_delivery_attempt_diagnostics(
+    watch_id="example-health",
+    status=DeliveryAttemptStatus.FAILED,
+    limit=100,
+)
+```
+
+返回值是 frozen typed Snapshot；Cursor 只用于在同一查询方向继续向后分页，不代表租约、锁或
+投递所有权。诊断代码不应记录完整 `last_error`、Event Payload 或其他可能包含下游数据的字段。
 
 ## 13. 跨工程事件消费
 

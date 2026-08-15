@@ -197,7 +197,9 @@ Trigger 只决定运行时机，不负责取得或解释领域状态。
 ### NFR-03 可诊断性
 
 最新 Watch 运行诊断必须通过 typed `get_watch_status()` 查询；Observation、Event、异常类型、尝试
-次数、投递尝试和 `DEAD` 状态必须通过 Public API 可查询，不要求下游读取内部表。
+次数、投递尝试和 `DEAD` 状态必须通过 Public API 可查询，不要求下游读取内部表。投递历史查询
+必须返回 typed Snapshot，支持有上限的分页和通用过滤，不得把 `SELECT *` 或 SQLite 列布局变成
+新的兼容性边界。
 
 ### NFR-04 可移植性
 
@@ -251,7 +253,7 @@ Trigger 只决定运行时机，不负责取得或解释领域状态。
 而不是倒置为一个尚未发生的 Release 门槛：
 
 1. 核心能力通过自动化测试，且测试不依赖网络。
-2. Python 3.11、3.12、3.13 的 CI 通过。
+2. Python 3.11、3.12、3.13、3.14 的 CI 通过。
 3. Public API 有最小可运行示例。
 4. `watch-event-v1` Schema 可被下游独立校验。
 5. 失败观测不会覆盖 Authority。

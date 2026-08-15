@@ -205,6 +205,11 @@ View、Trigger 或 Index；业务数据和个人信息必须使用独立存储�
 默认值为 100。
 
 `get_watch_status(watch_id)` 返回 typed、只读的最新运行诊断快照，下游无需读取 SQLite 内部表。
+`list_outbox_diagnostics()` 与 `list_delivery_attempt_diagnostics()` 分页返回 typed
+`OutboxDiagnostic` 和 `DeliveryAttemptDiagnostic`，支持按 Watch、状态和 Event 过滤，并使用整数
+Cursor。每页默认 100 条、上限 500 条，长时间运行的监控不必把完整投递历史一次性读入内存。
+旧的 raw-row Helper 为 0.x 兼容性继续保留；新采用方应使用 typed API，不依赖 SQLite 列名。
+
 模型构造时会复制调用方 JSON，frozen dataclass 也禁止字段重新绑定，但模型暴露的嵌套 JSON 容器
 不是深只读对象。应把它们当作快照，不要修改或跨并发任务共享；对这些内存容器的修改不会回写已经
 持久化的 Observation、Authority 或 Event。
@@ -227,6 +232,9 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 python -m pip_audit --local --progress-spinner=off
 ```
 

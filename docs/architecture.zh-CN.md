@@ -315,6 +315,12 @@ SQLite 中已提交的 Authority、Event、Outbox 和尝试记录保持有效。
 
 下游应从包公开入口导入类型，不导入带下划线的私有模块，不继承内部 SQLite 实现。
 
+运行诊断由 `WatchStatus` 表达；投递状态和尝试历史分别由 `OutboxDiagnostic` 与
+`DeliveryAttemptDiagnostic` 表达。`SQLiteStore.list_outbox_diagnostics()` 和
+`list_delivery_attempt_diagnostics()` 使用最大 500 条的 Keyset Pagination，按递增整数 ID
+继续查询，并可按 Watch、状态和 Event 过滤。Public Model 在 Storage 层显式映射固定语义字段，
+不得将 `sqlite3.Row`、`SELECT *` 或采用方拼接 SQL 暴露为跨版本契约。
+
 ### 11.2 Watch Event v1
 
 跨进程或跨工程传输使用 `schemas/watch-event-v1.json`。Event v1 的合法输入集合以已经发布的
@@ -394,6 +400,7 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 - 已有数据库的只读身份/Schema 对象、表列与约束拒绝路径；
 - 首次 Schema 创建中途失败的全量回滚与重试路径；
 - typed Watch 运行诊断查询及模型内存修改不回写持久状态。
+- typed Outbox/Delivery Attempt 分页、过滤、`DEAD` 查询和无效 Cursor/Limit 拒绝路径。
 
 测试使用 Fake Observer、Policy 和 Sink，不连接真实网站或通知服务。
 
