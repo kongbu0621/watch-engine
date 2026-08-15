@@ -99,3 +99,11 @@ def test_dependency_audit_covers_installed_development_environment() -> None:
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "python -m pip_audit . --progress-spinner=off" not in workflow
+
+    configuration = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert "setuptools>=83" in configuration["build-system"]["requires"]
+    assert "setuptools>=83" in configuration["project"]["optional-dependencies"]["dev"]
+    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5" in workflow
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6" in workflow
