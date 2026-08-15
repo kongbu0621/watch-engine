@@ -6,5 +6,6 @@ include SECURITY.zh-CN.md
 include DATA-GOVERNANCE.md
 include DATA-GOVERNANCE.zh-CN.md
 include CONTRIBUTING.md
+include CONTRIBUTING.zh-CN.md
 recursive-include docs *.md
 recursive-include schemas *.json
