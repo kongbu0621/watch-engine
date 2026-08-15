@@ -1,5 +1,7 @@
 # Repository guidance
 
+English | [简体中文](AGENTS.zh-CN.md)
+
 ## Purpose and boundaries
 
 `watch-engine` is a reusable, domain-neutral Condition Watch Runtime. Never add logic tied to a
@@ -61,6 +63,11 @@ Because `watch-engine` is independently reusable, also maintain a downstream ado
 Code, schema, packaging, runtime, deployment, release, or public-contract changes must update the
 affected document layer in the same change. Never describe a future plan as already implemented or
 an already published release as pending.
+
+Every human-facing English Markdown document must have a sibling `.zh-CN.md` version and link to
+it. The Chinese version must preserve public API names, protocol names, state values, commands,
+file paths, and important English engineering terms so readers can map the explanation back to
+code and external references. Update both language versions in the same change.
 
 ## Required checks
 
