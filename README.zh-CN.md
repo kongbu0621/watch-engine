@@ -179,7 +179,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
-python -m pip_audit . --progress-spinner=off
+python -m pip_audit --local --progress-spinner=off
 ```
 
 测试套件完全在本地运行，不需要网络或第三方服务。

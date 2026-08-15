@@ -589,16 +589,20 @@ PR #2 进一步增加直接回归：Public API 导出集合、SQLite Schema 版�
 - 安装 `.[dev]`；
 - 执行 `python -m pytest`。
 
-### 15.2 静态检查
+### 15.2 静态与依赖检查
 
 Python 3.11 环境运行：
 
 ```bash
 python -m ruff check .
 python -m mypy src
+python -m pip_audit --local --progress-spinner=off
 ```
 
-mypy 对 `watch_engine` 使用 strict 模式。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM 规则集。
+mypy 对 `watch_engine` 使用 strict 模式。Ruff 目标版本为 Python 3.11，启用 E、F、I、UP、B、SIM
+规则集。CI 已先安装 `.[dev]`，所以依赖审计必须使用 `--local` 检查该隔离环境中实际安装的运行依赖、
+测试工具、构建工具和静态检查工具；只把项目路径 `.` 传给 `pip-audit` 会重新解析项目运行依赖，不能
+覆盖已安装的开发/CI 依赖。
 
 ### 15.3 包构建与隔离安装
 
@@ -621,6 +625,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m pip_audit --local --progress-spinner=off
 ```
 
 测试完成后还应验证包构建：
@@ -740,7 +745,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | Schema 只存在于仓库 | `watch_engine.schemas`、`load_watch_event_schema` | 根 Schema 与 wheel resource 一致性测试 |
 | Event v1 被实现边界意外收紧 | 根与 wheel 的 `watch-event-v1.json` | 与 `v0.1.0` 发布基线保持相同合法值集合，并验证超长旧合法标识符 |
 | ISO 时间文本混合精度导致顺序反转 | `_sortable_timestamp_sql`、`to_sortable_iso` | 到期领取与清理覆盖整秒/微秒边界及旧数据库文本 |
-| 已知存在漏洞的开发测试依赖 | `pyproject.toml` 的 `pytest>=9.0.3,<10` | 使用安全版本重跑完整测试并执行 `pip-audit` |
+| 已知存在漏洞的开发测试依赖 | `pyproject.toml` 的 `pytest>=9.0.3,<10`、CI 的 `pip-audit --local` | 使用安全版本重跑完整测试，并审计隔离环境中实际安装的运行与开发依赖 |
 | 公共仓库误提交敏感文件 | `.gitignore`、`SECURITY.md`、`DATA-GOVERNANCE.md` | 文档发现性与禁用标识扫描 |
 | 无界投递批量 | `DeliveryConfig` 与 `claim_due` 的 500 条上限 | 501 在数据库操作前拒绝 |
 

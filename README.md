@@ -190,7 +190,7 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
-python -m pip_audit . --progress-spinner=off
+python -m pip_audit --local --progress-spinner=off
 ```
 
 The test suite is entirely local and requires no network or third-party service.

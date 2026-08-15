@@ -82,3 +82,20 @@ def test_candidate_version_and_release_status_are_consistent() -> None:
     assert "load_watch_event_schema()" in architecture
     assert "Event v1" in architecture
     assert "v0.1.0" in architecture
+
+
+def test_dependency_audit_covers_installed_development_environment() -> None:
+    command = "python -m pip_audit --local --progress-spinner=off"
+    for relative_path in (
+        ".github/workflows/ci.yml",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "README.zh-CN.md",
+        "docs/implementation.zh-CN.md",
+    ):
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert command in content, f"local dependency audit missing from {relative_path}"
+
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "python -m pip_audit . --progress-spinner=off" not in workflow
