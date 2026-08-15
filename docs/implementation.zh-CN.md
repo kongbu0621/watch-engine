@@ -39,6 +39,13 @@
 ```text
 watch-engine/
 ├── .github/workflows/ci.yml         # 测试矩阵和静态检查
+├── AGENTS.md / AGENTS.zh-CN.md      # 仓库协作规则及其中文版本
+├── CONTRIBUTING.md / CONTRIBUTING.zh-CN.md
+│                                      # 贡献规则及其中文版本
+├── SECURITY.md / SECURITY.zh-CN.md  # 安全策略
+├── DATA-GOVERNANCE.md / DATA-GOVERNANCE.zh-CN.md
+│                                      # 数据治理与隐私边界
+├── docs/*.zh-CN.md                  # 需求、架构、实现和采用中文文档
 ├── schemas/watch-event-v1.json      # 跨工程事件契约
 ├── src/watch_engine/
 │   ├── __init__.py                  # Public API 汇总
@@ -693,6 +700,7 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | FR-09 可靠投递 | Outbox / Dispatcher | `outbox`、`delivery_attempts`、`delivery.py` | 已实现 |
 | FR-10 跨工程契约 | Event Schema | `schemas/watch-event-v1.json` | 已实现 |
 | NFR-03 typed 诊断 | Persistence Public API | `WatchStatus`、`get_watch_status` | 已实现并测试 |
+| NFR-08 中文文档可用性 | Documentation Contract | `.zh-CN.md` 配对、双向链接、英文术语保留、sdist 配对 | 已实现并测试 |
 | 独立采用验证 | 匿名下游工程 | Public API + Schema | 已完成，证据在下游私有记录 |
 | wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
 | Schema wheel 分发 | 打包边界 | 0.2.0 候选 wheel 包含 package resource | 已实现并测试，尚未发布 |
@@ -763,6 +771,9 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 2. 模块边界、依赖或关键机制变化：更新架构设计；
 3. 文件、类、Schema、配置、运行、测试、部署或发布方式变化：更新本技术方案；
 4. 下游接入方式变化：更新采用指南；
-5. Public API 或事件契约变化：同时更新版本与兼容说明。
+5. Public API 或事件契约变化：同时更新版本与兼容说明；
+6. 面向人的英文 Markdown 变化：在同一变更中同步 `.zh-CN.md`，保留 Public API、Protocol、状态值、
+   Command、File Path 和关键英文术语，并保持双向语言入口；
+7. 新增文档子目录：仍必须接受递归双语配对、Relative Link 和术语检查，不能通过目录层级绕过。
 
 不得只更新代码而让落地方案失真，也不得只写未来方案却标记为当前已实现。
