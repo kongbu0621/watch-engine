@@ -286,7 +286,7 @@ def test_dependency_audit_covers_installed_development_environment() -> None:
     )
     assert "setuptools>=83" in configuration["build-system"]["requires"]
     assert "setuptools>=83" in configuration["project"]["optional-dependencies"]["dev"]
-    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5" in workflow
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7" in workflow
     assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6" in workflow
 
 
