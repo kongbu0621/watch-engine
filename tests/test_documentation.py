@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -59,3 +60,50 @@ def test_public_docs_do_not_contain_operational_identifiers() -> None:
             assert pattern.search(content) is None, (
                 f"{label} leaked in {markdown.relative_to(ROOT)}"
             )
+
+
+def test_candidate_version_and_release_status_are_consistent() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    version = project["version"]
+    assert version == "0.2.0"
+
+    readme = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    adoption = (ROOT / "docs/adoption-guide.zh-CN.md").read_text(encoding="utf-8")
+    implementation = (ROOT / "docs/implementation.zh-CN.md").read_text(encoding="utf-8")
+    architecture = (ROOT / "docs/architecture.zh-CN.md").read_text(encoding="utf-8")
+
+    for document in (readme, adoption, implementation):
+        assert version in document
+        assert "未发布" in document or "尚未发布" in document
+        assert "v0.1.0" in document
+
+    assert f"@v{version}" in adoption
+    assert "git+https://github.com/kongbu0621/watch-engine.git@v0.1.0" not in adoption
+    assert "load_watch_event_schema()" in architecture
+    assert "Event v1" in architecture
+    assert "v0.1.0" in architecture
+
+
+def test_dependency_audit_covers_installed_development_environment() -> None:
+    command = "python -m pip_audit --local --progress-spinner=off"
+    for relative_path in (
+        ".github/workflows/ci.yml",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "README.md",
+        "README.zh-CN.md",
+        "docs/implementation.zh-CN.md",
+    ):
+        content = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert command in content, f"local dependency audit missing from {relative_path}"
+
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "python -m pip_audit . --progress-spinner=off" not in workflow
+
+    configuration = tomllib.loads(
+        (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    assert "setuptools>=83" in configuration["build-system"]["requires"]
+    assert "setuptools>=83" in configuration["project"]["optional-dependencies"]["dev"]
+    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5" in workflow
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6" in workflow

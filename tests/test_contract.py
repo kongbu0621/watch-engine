@@ -112,7 +112,7 @@ def test_watch_event_v1_schema_rejects_invalid_instances(mutation) -> None:  # t
         validator.validate(event)
 
 
-def test_runtime_models_and_schema_share_metadata_length_limit() -> None:
+def test_runtime_metadata_limit_does_not_narrow_released_event_v1_contract() -> None:
     too_long = "x" * 2_049
     with pytest.raises(ValueError, match="must not exceed 2048"):
         EventDraft(
@@ -136,8 +136,26 @@ def test_runtime_models_and_schema_share_metadata_length_limit() -> None:
         payload={},
     ).to_dict()
     event["event_id"] = too_long
-    with pytest.raises(ValidationError):
-        Draft202012Validator(schema).validate(event)
+    Draft202012Validator(schema).validate(event)
+
+
+def test_event_v1_accepts_every_released_identifier_length() -> None:
+    """v0.1.0 allowed every non-empty length; Event v1 must remain compatible."""
+
+    schema = load_watch_event_schema()
+    event = {
+        "schema_version": "1.0",
+        "event_id": "e" * 2_049,
+        "watch_id": "w" * 2_049,
+        "event_type": "t" * 2_049,
+        "severity": "s" * 2_049,
+        "occurred_at": "2025-01-01T00:00:00Z",
+        "dedupe_key": "d" * 2_049,
+        "subject": {},
+        "payload": {},
+    }
+
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(event)
 
 
 def test_naive_event_datetime_is_rejected() -> None:

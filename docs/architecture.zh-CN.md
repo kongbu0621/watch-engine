@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文描述 `watch-engine` v0.1 的程序架构、模块边界、核心对象、执行流程、持久化事务、并发与失败语义，以及对下游保持稳定的集成契约。
+本文描述 `watch-engine` 当前 0.x 版本线的程序架构、模块边界、核心对象、执行流程、持久化事务、并发与失败语义，以及对下游保持稳定的集成契约。
 
 需求依据见 [模块需求说明](module-requirements.zh-CN.md)，当前版本的具体代码与数据落地见 [实际落地技术方案](implementation.zh-CN.md)，下游接入步骤见 [采用指南](adoption-guide.zh-CN.md)。
 
@@ -92,7 +92,7 @@ Runtime 不解释领域状态，不直接投递通知。
 
 ### 4.4 Persistence 层
 
-`SQLiteStore` 是 v0.1 的单节点持久化实现，负责：
+`SQLiteStore` 是当前 0.x 的单节点持久化实现，负责：
 
 - Schema 初始化与版本；
 - Watch 运行元数据；
@@ -114,13 +114,13 @@ Runtime 不解释领域状态，不直接投递通知。
 - 计算有界指数退避；
 - 重试耗尽后标记 `DEAD`。
 
-v0.1 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控进程；Runner 与
+当前 0.x 要求每个 SQLite 数据库同一时刻只有一个活跃的本机监控进程；Runner 与
 `OutboxDispatcher` 均由该进程拥有，新增目标优先在进程内串行执行。
 `recover_in_flight()` 会在 Dispatcher 实例第一次运行时把全部 `DELIVERING` 视为上一个进程的
 中断遗留；如果两个 Dispatcher 同时工作，新实例可能错误恢复另一个仍在投递的事件并造成并发重复。
 若当前实例在领取后因确认、时钟或其他内部异常/中断退出本次调用，它会重置自身恢复状态，同一对象
 下次调用也会先恢复遗留 `DELIVERING`。
-at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为 v0.1 支持能力。
+at-least-once 允许崩溃后的重复投递，但不把多进程或多 Dispatcher 并发协调作为当前 0.x 支持能力。
 Outbox 确认会校验事件身份、当前状态与已完成尝试计数，但该计数不是租约或唯一 claim token，不能
 补偿违反单所有者约束而产生的重叠 Dispatcher。
 
@@ -164,6 +164,11 @@ sequenceDiagram
     Sink-->>Dispatcher: 成功或异常
     Dispatcher->>Store: 记录结果/退避/DEAD
 ```
+
+到期领取和按截止时间清理都依赖时间顺序。历史 0.x 数据可能同时包含不带小数的
+`...00Z` 与带六位小数的 `...00.500000Z`；直接按 SQLite 文本比较会把两者排反。存储查询因此在
+比较前把旧的整秒文本规范化为六位小数，并把查询参数转换成同样的 UTC 定宽形式。该兼容层覆盖
+既有数据库，无需破坏性迁移；时间字段对外读取仍按带时区 `datetime` 解释。
 
 ## 6. Observation 与 Authority 模型
 
@@ -235,7 +240,7 @@ Previous Authority、领域决策、Event 和 New Authority 必须依据同一�
 
 ## 8. 并发与顺序
 
-v0.1 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠。
+当前 0.x 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠。
 
 处理规则：
 
@@ -250,7 +255,7 @@ v0.1 是单节点模型，但同一 `watch_id` 的 Observer 调用可以重叠�
 Observer 重叠时，一个较早完成的运行可能把状态写回 `IDLE`，而另一个运行仍在执行。因此下游
 不得使用该字段进行调度互斥、健康判定或 Authority 决策。
 
-SQLite 不是分布式锁，因此多个主机共享数据库不属于 v0.1 支持范围。
+SQLite 不是分布式锁，因此多个主机共享数据库不属于当前 0.x 支持范围。
 
 ## 9. 事件身份和投递语义
 
@@ -312,16 +317,28 @@ SQLite 中已提交的 Authority、Event、Outbox 和尝试记录保持有效。
 
 ### 11.2 Watch Event v1
 
-跨进程或跨工程传输使用 `schemas/watch-event-v1.json`。v0.1.0 的 wheel 不包含这个仓库级
-Schema；消费者应从固定 Release Tag 获取并随自身版本固定保存，而不是读取会继续变化的 `main`：
+跨进程或跨工程传输使用 `schemas/watch-event-v1.json`。Event v1 的合法输入集合以已经发布的
+`v0.1.0` Schema 为兼容基线；同一 `$id` 和 `schema_version = "1.0"` 不得删除字段、改变语义或
+收紧既有合法值。当前仓库的两份 Event v1 Schema 与该发布基线保持一致。
+
+`v0.1.0` 的 wheel 不包含这个仓库级 Schema；固定在该版本的消费者应从固定 Release Tag 获取并
+随自身版本保存，而不是读取会继续变化的 `main`：
 
 `https://raw.githubusercontent.com/kongbu0621/watch-engine/v0.1.0/schemas/watch-event-v1.json`
+
+未发布的 `v0.2.0` 候选版本把同一份 Schema 打包为 package resource，并提供
+`load_watch_event_schema()`。只有在 `v0.2.0` Tag/Release 实际创建后，生产消费者才能从该版本
+wheel 读取或从同版本 Tag 固定保存；不能把候选源码状态写成已发布能力。
 
 兼容性规则：
 
 - v1 内新增可选字段可以是向后兼容变更；
 - 删除字段、改变语义或收紧已有合法值属于破坏性变更；
 - 破坏性变更必须引入新 Schema 版本和迁移说明。
+
+运行时对新建 Python 模型实施的 2,048 字符和 1 MiB 上限属于当前实现的输入/输出资源边界，不能
+反向写入已经发布的 Event v1 Schema，从而拒绝旧消费者仍可合法处理的消息。如果跨工程契约确实
+需要收紧，必须发布新的 Schema 版本和文件。
 
 ### 11.3 SQLite 非契约
 
@@ -342,7 +359,7 @@ flowchart TD
 
 ## 13. 部署边界
 
-v0.1 提供运行组件，不提供通用 daemon CLI 或进程监督器。
+当前 0.x 提供运行组件，不提供通用 daemon CLI 或进程监督器。
 
 推荐下游负责：
 
@@ -380,7 +397,7 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 
 测试使用 Fake Observer、Policy 和 Sink，不连接真实网站或通知服务。
 
-## 15. v0.1 限制
+## 15. 当前 0.x 限制
 
 - 单节点 SQLite；
 - 每个数据库只支持一个活跃 Outbox Dispatcher；
@@ -413,7 +430,8 @@ stop 不会立即唤醒 Trigger；需要及时停机的下游应取消外层 asy
 - 已有非空 SQLite 必须在任何 chmod、写型 PRAGMA 或 DDL 前只读验证版本、完整对象集合、表列和约束；
 - Runtime 与 Dispatcher 捕获异常时只保存异常类型和固定文案，不记录异常消息或 traceback；库日志也不输出调用方可控的 `watch_id/event_id`；
 - 调用方主动提供的 state、evidence、error、subject、payload 必须在进入引擎前完成最小化和脱敏；
-- 单个 JSON 字段编码上限为 1 MiB，标识符/事件元数据标量和 error 上限为 2,048 字符；
+- Runtime 新建模型的单个 JSON 字段编码上限为 1 MiB，标识符/事件元数据标量和 error 上限为
+  2,048 字符；该边界不收紧已发布 Event v1 消费契约；
 - `purge_before()` 只清理终态投递历史与非 Authority 观测，未投递事件与当前 Authority 始终保留；
 - `delete_watch()` 默认拒绝删除未投递事件，显式 override 才允许破坏性删除；
 - `compact_storage()` 只在其他数据库所有者停止后执行；备份、快照、SSD 映射和外部日志不在 SQLite 擦除保证内。

@@ -1,4 +1,4 @@
-"""Public API for watch-engine v0.1."""
+"""Public API for watch-engine."""
 
 from watch_engine.delivery import OutboxDispatcher
 from watch_engine.interfaces import EventSink, Observer, TransitionPolicy, Trigger

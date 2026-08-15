@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "watch-engine"
-version = "0.1.1"
+version = "0.2.0"
 description = "Reusable condition-watch runtime with durable observations and event delivery"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,9 +21,10 @@ dev = [
   "jsonschema>=4.23,<5",
   "mypy>=1.11,<2",
   "pip-audit>=2.9,<3",
-  "pytest>=8,<9",
+  "pytest>=9.0.3,<10",
   "rfc3339-validator>=0.1.4,<1",
   "ruff>=0.9,<1",
+  "setuptools>=83",
 ]
 
 [tool.setuptools.packages.find]

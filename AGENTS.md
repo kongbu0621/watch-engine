@@ -6,7 +6,7 @@
 particular product, retailer, notification provider, agent, or business state. Domain code enters
 only through the public Observer, TransitionPolicy, Trigger, and EventSink protocols.
 
-The v0.1 boundary is Python 3.11+, SQLite, in-process scheduling adapters, synchronous observers
+The current 0.x boundary is Python 3.11+, SQLite, in-process scheduling adapters, synchronous observers
 and sinks, and an async trigger adapter. Do not casually add Redis, PostgreSQL, brokers,
 distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
 
@@ -33,7 +33,7 @@ distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
   responsible for idempotent downstream processing by `event_id`. `dedupe_key` is domain context,
   not lifetime event identity.
 - Delivery failure must not roll back or modify authoritative state.
-- v0.1 permits only one active OutboxDispatcher owner per SQLite database. A new dispatcher
+- The current 0.x line permits only one active OutboxDispatcher owner per SQLite database. A new dispatcher
   recovers every `DELIVERING` row and therefore must start only after the old owner has exited.
 - `WatchRunner.serve()` stop is cooperative between runs; it does not wake a pending trigger or
   terminate synchronous work already handed to `asyncio.to_thread`.
@@ -46,7 +46,7 @@ distributed locks, service discovery, Kubernetes, plugin loaders, or a web UI.
 compatible. Any destructive schema change requires a new schema version and a new schema file;
 never silently rewrite v1 semantics. Internal Python models are not the cross-project contract.
 
-Database evolution starts at `SQLiteStore.SCHEMA_VERSION`. v0.1 has no migration framework, but
+Database evolution starts at `SQLiteStore.SCHEMA_VERSION`. The current 0.x line has no migration framework, but
 schema changes must detect unsupported versions rather than reinterpret existing data.
 
 ## Documentation baseline
@@ -71,6 +71,7 @@ python -m pytest
 python -m ruff check .
 python -m mypy src
 python -m build
+python -m pip_audit --local --progress-spinner=off
 ```
 
 Tests must not use external networks or real third-party services. Add focused tests for any

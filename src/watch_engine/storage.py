@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from watch_engine._errors import bounded_error_text
 from watch_engine._json import decode_json, encode_json
-from watch_engine._time import from_iso, require_aware, to_iso, utc_now
+from watch_engine._time import from_iso, require_aware, to_iso, to_sortable_iso, utc_now
 from watch_engine.interfaces import TransitionPolicy
 from watch_engine.models import (
     _MAX_DELIVERY_BATCH_SIZE,
@@ -30,6 +30,28 @@ from watch_engine.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TIMESTAMP_SQL_COLUMNS = frozenset(
+    {"e.created_at", "o.created_at", "o.next_attempt_at"}
+)
+
+
+def _sortable_timestamp_sql(column: str) -> str:
+    """Normalize legacy engine timestamps to fixed-width UTC text in SQL.
+
+    ``datetime.isoformat()`` omits the fractional component for exact seconds. The
+    resulting ``...00Z`` sorts after ``...00.500000Z`` even though it is earlier.
+    Existing v0.1 databases may contain both forms, so comparison queries must
+    normalize stored exact-second values instead of only changing new writes.
+    """
+
+    if column not in _TIMESTAMP_SQL_COLUMNS:
+        raise ValueError("unsupported timestamp SQL column")
+    return (
+        f"CASE WHEN instr({column}, '.') = 0 "
+        f"THEN substr({column}, 1, length({column}) - 1) || '.000000Z' "
+        f"ELSE {column} END"
+    )
 
 _SCHEMA_SQL = """
 BEGIN IMMEDIATE;
@@ -1105,16 +1127,17 @@ class SQLiteStore:
         if limit > _MAX_DELIVERY_BATCH_SIZE:
             raise ValueError(f"limit must be at most {_MAX_DELIVERY_BATCH_SIZE}")
         timestamp = now if now is not None else self._clock()
+        due_timestamp_sql = _sortable_timestamp_sql("o.next_attempt_at")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
-                """
+                f"""
                 SELECT o.outbox_id, o.attempts, e.*
                 FROM outbox o JOIN events e ON e.event_id = o.event_id
-                WHERE o.status IN ('PENDING', 'RETRY') AND o.next_attempt_at <= ?
+                WHERE o.status IN ('PENDING', 'RETRY') AND {due_timestamp_sql} <= ?
                 ORDER BY o.outbox_id LIMIT ?
-                """,
-                (to_iso(timestamp), limit),
+                """,  # noqa: S608 - only a validated internal column is composed
+                (to_sortable_iso(timestamp), limit),
             ).fetchall()
             ids = [int(row["outbox_id"]) for row in rows]
             if ids:
@@ -1216,9 +1239,9 @@ class SQLiteStore:
         self, cutoff: datetime, *, watch_id: str | None = None
     ) -> PurgeResult:
         """Delete old terminal history while preserving authority and undelivered events."""
-        cutoff_text = to_iso(require_aware(cutoff, field="cutoff"))
-        event_filter = "e.created_at < ?"
-        observation_filter = "o.created_at < ?"
+        cutoff_text = to_sortable_iso(require_aware(cutoff, field="cutoff"))
+        event_filter = f"{_sortable_timestamp_sql('e.created_at')} < ?"
+        observation_filter = f"{_sortable_timestamp_sql('o.created_at')} < ?"
         event_parameters: list[str] = [cutoff_text]
         observation_parameters: list[str] = [cutoff_text]
         if watch_id is not None:

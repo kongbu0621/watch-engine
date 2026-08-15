@@ -11,7 +11,7 @@ python -m pytest
 python -m ruff check .
 python -m mypy src
 python -m build
-python -m pip_audit . --progress-spinner=off
+python -m pip_audit --local --progress-spinner=off
 ```
 
 Use synthetic fixtures. Do not include personal information, credentials, private downstream

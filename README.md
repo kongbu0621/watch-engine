@@ -10,6 +10,10 @@ It solves the reliability mechanics shared by polling and event-driven monitors.
 scrape websites, understand domain states such as `AVAILABLE`, send messages to a particular
 provider, or provide a distributed scheduler or web administration UI.
 
+Version status: `v0.1.0` is the latest immutable release. The source tree currently describes the
+unreleased `0.2.0` candidate; do not treat `main` as a release. See the
+[adoption guide](docs/adoption-guide.zh-CN.md) for verified pinning and build instructions.
+
 ## Core concepts
 
 - `WatchDefinition` composes a `Trigger`, `Observer`, `TransitionPolicy`, and observer retry
@@ -134,7 +138,7 @@ Delivery is intentionally **at least once**. A process can die
 after a sink accepts an event but before SQLite records success; the next process will send the
 same stored `event_id` again. Sinks must deduplicate by `event_id`. Failed attempts use configurable,
 bounded exponential backoff and survive restart. Exhausted events remain as `DEAD` diagnostics.
-The v0.1 SQLite backend supports one owning local process and one active dispatcher. Its completed
+The current 0.x SQLite backend supports one owning local process and one active dispatcher. Its completed
 attempt count is checked during acknowledgement but is not a lease or unique claim token; old and
 replacement dispatchers must never overlap.
 
@@ -150,8 +154,9 @@ ordering. The cross-project contract is
 [`schemas/watch-event-v1.json`](schemas/watch-event-v1.json); consumers should use that contract,
 not import internal database models.
 
-Each encoded JSON field is limited to 1 MiB, scalar identifiers/event metadata to 2,048
-characters, and error fields to 2,048 characters. Retention is caller-controlled:
+Runtime-created models limit each encoded JSON field to 1 MiB, scalar identifiers/event metadata
+to 2,048 characters, and error fields to 2,048 characters. These implementation limits do not
+narrow the already released Event v1 consumer contract. Retention is caller-controlled:
 `purge_before(cutoff)` deletes only old terminal (`DELIVERED`/`DEAD`) event history and
 non-authoritative observations, `delete_watch()` refuses undelivered work unless explicitly
 overridden with the actual boolean `True`, and `compact_storage()` checkpoints and vacuums after
@@ -185,12 +190,12 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
-python -m pip_audit . --progress-spinner=off
+python -m pip_audit --local --progress-spinner=off
 ```
 
 The test suite is entirely local and requires no network or third-party service.
 
-## v0.1 boundaries
+## Current 0.x boundaries
 
 The runtime is intentionally single-node and synchronous at the observer/sink boundary. SQLite
 coordinates local transactions; it is not a distributed lock.
@@ -209,7 +214,7 @@ conservative first-wins rule: the already promoted Authority remains authoritati
 completion is evidence-only. Timestamps must be timezone-aware and precise enough to order the
 Observer's real evidence.
 
-The trigger adapter is async, but v0.1 does not include a daemon CLI, process supervisor,
+The trigger adapter is async, but the current 0.x line does not include a daemon CLI, process supervisor,
 distributed scheduler, dynamic plugin loader, PostgreSQL, Redis, or a message broker.
 
 Implemented triggers are jittered intervals, cron schedules, and in-process manual requests.
