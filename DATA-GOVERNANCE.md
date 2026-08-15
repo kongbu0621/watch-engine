@@ -21,8 +21,9 @@ provided Observer or EventSink implementations and remains the adopter's respons
 
 ## Storage and retention
 
-- JSON fields are limited to 1 MiB encoded size; identifiers, scalar event metadata, and error
-  fields are limited to 2,048 characters.
+- Runtime-created model JSON fields are limited to 1 MiB encoded size; identifiers, scalar event
+  metadata, and error fields are limited to 2,048 characters. These implementation limits do not
+  narrow the already released Event v1 consumer contract.
 - POSIX SQLite database, WAL, and SHM files are owner-only (`0600`) single-link regular files; use
   a `0700` parent directory and do not create hard-link aliases.
 - Treat the SQLite file as engine-owned. Never co-locate adopter tables, views, triggers, indexes,
