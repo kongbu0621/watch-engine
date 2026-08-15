@@ -26,6 +26,19 @@ class RunStatus(StrEnum):
     ERROR = "ERROR"
 
 
+class OutboxStatus(StrEnum):
+    PENDING = "PENDING"
+    DELIVERING = "DELIVERING"
+    RETRY = "RETRY"
+    DELIVERED = "DELIVERED"
+    DEAD = "DEAD"
+
+
+class DeliveryAttemptStatus(StrEnum):
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
 @dataclass(frozen=True, slots=True)
 class Observation:
     """One observed fact; only VALID observations may become authoritative."""
@@ -321,6 +334,74 @@ class WatchStatus:
             object.__setattr__(self, "last_error", bounded_error_text(self.last_error))
 
 
+@dataclass(frozen=True, slots=True)
+class OutboxDiagnostic:
+    """Typed, read-only delivery state detached from the SQLite schema."""
+
+    outbox_id: int
+    event_id: str
+    watch_id: str
+    status: OutboxStatus
+    attempts: int
+    created_at: datetime
+    updated_at: datetime
+    next_attempt_at: datetime | None = None
+    locked_at: datetime | None = None
+    delivered_at: datetime | None = None
+    last_error: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_positive_integer(self.outbox_id, field="outbox_id")
+        _require_non_empty_string(self.event_id, field="event_id")
+        _require_non_empty_string(self.watch_id, field="watch_id")
+        if not isinstance(self.status, OutboxStatus):
+            raise TypeError("status must be an OutboxStatus")
+        _require_non_negative_integer(self.attempts, field="attempts")
+        for field_name in ("created_at", "updated_at"):
+            value = getattr(self, field_name)
+            object.__setattr__(self, field_name, require_aware(value, field=field_name))
+        for field_name in ("next_attempt_at", "locked_at", "delivered_at"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, require_aware(value, field=field_name))
+        if self.last_error is not None:
+            if not isinstance(self.last_error, str):
+                raise TypeError("last_error must be a string or None")
+            object.__setattr__(self, "last_error", bounded_error_text(self.last_error))
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryAttemptDiagnostic:
+    """Typed, read-only snapshot of one completed delivery attempt."""
+
+    attempt_id: int
+    outbox_id: int
+    event_id: str
+    watch_id: str
+    attempt_number: int
+    attempted_at: datetime
+    status: DeliveryAttemptStatus
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_positive_integer(self.attempt_id, field="attempt_id")
+        _require_positive_integer(self.outbox_id, field="outbox_id")
+        _require_non_empty_string(self.event_id, field="event_id")
+        _require_non_empty_string(self.watch_id, field="watch_id")
+        _require_positive_integer(self.attempt_number, field="attempt_number")
+        object.__setattr__(
+            self,
+            "attempted_at",
+            require_aware(self.attempted_at, field="attempted_at"),
+        )
+        if not isinstance(self.status, DeliveryAttemptStatus):
+            raise TypeError("status must be a DeliveryAttemptStatus")
+        if self.error is not None:
+            if not isinstance(self.error, str):
+                raise TypeError("error must be a string or None")
+            object.__setattr__(self, "error", bounded_error_text(self.error))
+
+
 def _require_non_empty_string(value: object, *, field: str) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be a string")
@@ -330,3 +411,17 @@ def _require_non_empty_string(value: object, *, field: str) -> None:
         raise ValueError(
             f"{field} must not exceed {MAX_METADATA_CHARACTERS} characters"
         )
+
+
+def _require_non_negative_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field} must be an integer")
+    if value < 0:
+        raise ValueError(f"{field} must not be negative")
+    return value
+
+
+def _require_positive_integer(value: object, *, field: str) -> None:
+    normalized = _require_non_negative_integer(value, field=field)
+    if normalized < 1:
+        raise ValueError(f"{field} must be positive")

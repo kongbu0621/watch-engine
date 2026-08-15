@@ -25,6 +25,7 @@ dev = [
   "rfc3339-validator>=0.1.4,<1",
   "ruff>=0.9,<1",
   "setuptools>=83",
+  "twine>=6,<7",
 ]
 
 [tool.setuptools.packages.find]

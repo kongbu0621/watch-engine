@@ -1,6 +1,6 @@
 # watch-engine
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](https://github.com/kongbu0621/watch-engine/blob/main/README.zh-CN.md)
 
 `watch-engine` is a reusable Python 3.11+ condition-watch runtime. It schedules observations,
 preserves trustworthy state, asks domain code to interpret transitions, persists resulting
@@ -12,7 +12,63 @@ provider, or provide a distributed scheduler or web administration UI.
 
 Version status: `v0.1.0` is the latest immutable release. The source tree currently describes the
 unreleased `0.2.0` candidate; do not treat `main` as a release. See the
-[adoption guide](docs/adoption-guide.zh-CN.md) for verified pinning and build instructions.
+[adoption guide](https://github.com/kongbu0621/watch-engine/blob/main/docs/adoption-guide.zh-CN.md)
+for verified pinning and build instructions.
+
+## What this module is for
+
+Use `watch-engine` when a program must repeatedly observe something, distinguish trustworthy
+evidence from an observation failure, decide whether a real state transition occurred, and keep
+the resulting event until a downstream consumer accepts it. Without a shared engine, every
+monitor tends to reimplement scheduling, last-known-good state, restart recovery, transition
+comparison, event persistence, retry, and duplicate-delivery handling.
+
+```text
+Trigger -> Observer -> Observation -> SQLite evidence
+                         |
+                         +-- VALID -> Authority -> TransitionPolicy
+                                                   |
+                                                   v
+                                             Event + Outbox
+                                                   |
+                                                   v
+                                               EventSink
+```
+
+Examples include watching service health, file readiness, API results, job completion, or a
+business threshold. The adopting application defines how to observe the subject, what the state
+means, which transitions matter, and where events go. `watch-engine` owns the reusable control
+loop and reliability boundary around those decisions.
+
+| Reuse question | Current 0.x answer |
+| --- | --- |
+| What is the value? | Shared scheduling, durable evidence, last-known-good Authority, deterministic transition evaluation, transactional Event/Outbox creation, bounded retry, restart recovery, and lifecycle operations. |
+| What must the adopter provide? | An `Observer`, a domain `TransitionPolicy`, an idempotent `EventSink`, and configuration that composes them into a `WatchDefinition`. |
+| What happens when observation is uncertain? | `DEGRADED` and `FAILED` evidence is retained for diagnosis but never silently becomes a business transition or replaces the last valid Authority. |
+| What is the delivery guarantee? | At-least-once, not exactly-once. A sink must make replay of the same `event_id` harmless. |
+| What must run? | The adopter owns the process loop or supervisor. The current SQLite boundary allows one owning local process and one active dispatcher per database. |
+| What is deliberately absent? | Product-specific scraping/parsing, business-state definitions, notification-provider integrations, a daemon/service manager, distributed coordination, multi-tenant administration, and a web UI. |
+
+Reuse this module when:
+
+- Several monitors would otherwise duplicate the same scheduling, state, persistence, and retry
+  mechanics.
+- A failed or incomplete observation must remain distinct from a confirmed state change.
+- State authority and generated events must survive process restart and remain auditable.
+- A later delivery retry must reuse one stable event identity.
+- A new domain should plug in through `Observer`, `TransitionPolicy`, and `EventSink` rather than
+  add product-specific branches to a shared Core.
+
+Do not use this module when:
+
+- The task is a one-off check and losing its in-memory result is acceptable.
+- A direct, best-effort callback is sufficient and durable state or retry evidence adds no value.
+- Duplicate delivery is unacceptable and the downstream consumer cannot deduplicate by
+  `event_id`.
+- You require multiple concurrent owner processes, distributed leases, high availability, or a
+  shared network database; those are outside the current SQLite design.
+- You expect the library to scrape a particular site, interpret a particular product or business
+  state, manage recipients/templates, or send through a built-in notification Provider.
 
 ## Core concepts
 
@@ -151,7 +207,8 @@ classified its evidence, so that result is persisted immediately and is not retr
 
 All timestamps are timezone-aware and normalized to UTC. JSON is stored with deterministic key
 ordering. The cross-project contract is
-[`schemas/watch-event-v1.json`](schemas/watch-event-v1.json); consumers should use that contract,
+[`schemas/watch-event-v1.json`](https://github.com/kongbu0621/watch-engine/blob/main/schemas/watch-event-v1.json);
+consumers should use that contract,
 not import internal database models.
 
 Runtime-created models limit each encoded JSON field to 1 MiB, scalar identifiers/event metadata
@@ -173,13 +230,22 @@ keep business and personal data in separate storage. Delivery claims are bounded
 batch; the default is 100.
 
 `get_watch_status(watch_id)` returns a typed, read-only diagnostic snapshot without requiring
-callers to query internal SQLite tables. Model construction detaches caller-owned JSON and frozen
-dataclasses prevent field reassignment, but nested JSON containers exposed by a model are not
-deeply read-only. Treat them as snapshots and do not mutate or share them across concurrent code;
-such in-memory mutation never writes through to persisted Observation, Authority, or Event rows.
+callers to query internal SQLite tables. `list_outbox_diagnostics()` and
+`list_delivery_attempt_diagnostics()` return typed `OutboxDiagnostic` and
+`DeliveryAttemptDiagnostic` pages, support Watch/status/event filters, and use integer cursors.
+Pages default to 100 items and are capped at 500, so long-lived monitors do not have to load their
+complete delivery history. The legacy raw-row helpers remain for 0.x compatibility, but new
+adopters should use the typed APIs instead of depending on SQLite column names.
 
-Before production use, read the [security policy](SECURITY.md) and
-[data-governance policy](DATA-GOVERNANCE.md). Engine fields must not contain credentials,
+Model construction detaches caller-owned JSON and frozen dataclasses prevent field reassignment,
+but nested JSON containers exposed by a model are not deeply read-only. Treat them as snapshots
+and do not mutate or share them across concurrent code; such in-memory mutation never writes
+through to persisted Observation, Authority, or Event rows.
+
+Before production use, read the
+[security policy](https://github.com/kongbu0621/watch-engine/blob/main/SECURITY.md) and
+[data-governance policy](https://github.com/kongbu0621/watch-engine/blob/main/DATA-GOVERNANCE.md).
+Engine fields must not contain credentials,
 personal information, or other sensitive data.
 Library-generated logs omit caller-controlled watch/event identifiers and payload fields.
 
@@ -190,6 +256,9 @@ python -m pip install -e ".[dev]"
 python -m pytest
 python -m ruff check .
 python -m mypy src
+python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 python -m pip_audit --local --progress-spinner=off
 ```
 
@@ -223,4 +292,5 @@ observation/authority/event pipeline.
 
 ## License
 
-Apache License 2.0. See [`LICENSE`](LICENSE).
+Apache License 2.0. See
+[`LICENSE`](https://github.com/kongbu0621/watch-engine/blob/main/LICENSE).

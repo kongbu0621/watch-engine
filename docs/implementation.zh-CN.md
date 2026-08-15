@@ -29,7 +29,7 @@
 | 唯一身份 | UUID 字符串 observation_id / event_id |
 | 自动化测试 | pytest |
 | 静态检查 | Ruff + mypy strict |
-| CI | GitHub Actions，Python 3.11/3.12/3.13 |
+| CI | GitHub Actions，Python 3.11/3.12/3.13/3.14 |
 | 许可证 | Apache License 2.0 |
 
 运行时依赖仅包含 `croniter>=2.0,<7`。pytest、mypy、Ruff、jsonschema 和 rfc3339-validator 位于 `dev` 可选依赖。
@@ -39,6 +39,13 @@
 ```text
 watch-engine/
 ├── .github/workflows/ci.yml         # 测试矩阵和静态检查
+├── AGENTS.md / AGENTS.zh-CN.md      # 仓库协作规则及其中文版本
+├── CONTRIBUTING.md / CONTRIBUTING.zh-CN.md
+│                                      # 贡献规则及其中文版本
+├── SECURITY.md / SECURITY.zh-CN.md  # 安全策略
+├── DATA-GOVERNANCE.md / DATA-GOVERNANCE.zh-CN.md
+│                                      # 数据治理与隐私边界
+├── docs/*.zh-CN.md                  # 需求、架构、实现和采用中文文档
 ├── schemas/watch-event-v1.json      # 跨工程事件契约
 ├── src/watch_engine/
 │   ├── __init__.py                  # Public API 汇总
@@ -88,6 +95,10 @@ watch-engine/
 - `RetryPolicy`
 - `DeliveryConfig`
 - `DeliveryResult`
+- `OutboxDiagnostic`
+- `OutboxStatus`
+- `DeliveryAttemptDiagnostic`
+- `DeliveryAttemptStatus`
 
 ### 4.4 内置实现
 
@@ -522,6 +533,13 @@ SQLite 文件当作分布式协调数据库。
 - Outbox `last_error`；
 - `delivery_attempts` 历史。
 
+`SQLiteStore.list_outbox_diagnostics()` 将 Outbox 与 Event 显式 Join 后映射成 typed
+`OutboxDiagnostic`；`list_delivery_attempt_diagnostics()` 映射成 typed
+`DeliveryAttemptDiagnostic`。两者默认返回 100 条、最大 500 条，按递增 ID 使用 Keyset Cursor，
+并提供 Watch、状态及 Event Filter。SQL 明确列出字段，不使用 `SELECT *` 建立 Public Contract。
+旧的 `outbox_rows()` 与 `delivery_attempt_rows()` 只为 0.x 兼容保留，并改为显式列清单；新代码和
+文档不得把它们作为推荐入口。
+
 ### 13.2 Python 日志
 
 Runtime、Storage 和 Dispatcher 使用标准 `logging`，只附带异常类型、尝试次数、时间戳等不含
@@ -569,6 +587,7 @@ Runtime、Storage 和 Dispatcher 使用标准 `logging`，只附带异常类型�
 20. WAL checkpoint 繁忙时压缩明确失败，不把未完成 checkpoint 报成成功。
 21. `get_watch_status()` 对不存在、成功、失败三种 Watch 返回稳定 typed 诊断，且不暴露内部表查询。
 22. 首次 Schema 创建中途失败时所有用户对象回滚，随后可重新初始化完整 v1 Schema。
+23. typed Outbox/Delivery Attempt 诊断覆盖分页、过滤、`DEAD`、失败 Attempt 与非法 Cursor/Limit。
 
 文档示例必须对照当前 Public API，不得使用尚未实现的类、参数或 CLI。
 
@@ -586,6 +605,7 @@ PR #2 进一步增加直接回归：Public API 导出集合、SQLite Schema 版�
 - Python 3.11；
 - Python 3.12；
 - Python 3.13；
+- Python 3.14；
 - 安装 `.[dev]`；
 - 执行 `python -m pytest`。
 
@@ -611,10 +631,12 @@ mypy 对 `watch_engine` 使用 strict 模式。Ruff 目标版本为 Python 3.11�
 CI 还必须：
 
 1. 执行 `python -m build` 生成 sdist 和 wheel；
-2. 创建全新虚拟环境；
-3. 从 `dist/*.whl` 安装，包括声明的运行时依赖；
-4. 离开仓库工作目录后导入 `watch_engine`；
-5. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
+2. 执行 `python -m twine check dist/*` 验证 PyPI Long Description 可渲染；
+3. 执行 `scripts/verify_sdist_bilingual.py`，动态检查实际 sdist 中每份英文 Markdown 都有同目录中文版本；
+4. 创建全新虚拟环境；
+5. 从 `dist/*.whl` 安装，包括声明的运行时依赖；
+6. 离开仓库工作目录后导入 `watch_engine`；
+7. 确认导入位置来自虚拟环境的 `site-packages`，而不是源码目录或 editable install。
 
 这个 Job 验证包发现、构建元数据、wheel 内容和安装入口；它不能替代 Runtime 测试。当前未发布的
 `0.2.0` 候选版本还必须验证 `load_watch_event_schema()` 能从安装后的 wheel 读取与仓库根 Schema
@@ -635,6 +657,8 @@ python -m pip_audit --local --progress-spinner=off
 ```bash
 python -m pip install build
 python -m build
+python -m twine check dist/*
+python scripts/verify_sdist_bilingual.py dist/*.tar.gz
 ```
 
 发布前建议在全新虚拟环境安装生成的 wheel，运行最小采用示例，确认未隐式依赖仓库源码路径。
@@ -692,7 +716,8 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 | FR-08 事件身份 | Event Model | `EventDraft / WatchEvent / _insert_events` | 已实现 |
 | FR-09 可靠投递 | Outbox / Dispatcher | `outbox`、`delivery_attempts`、`delivery.py` | 已实现 |
 | FR-10 跨工程契约 | Event Schema | `schemas/watch-event-v1.json` | 已实现 |
-| NFR-03 typed 诊断 | Persistence Public API | `WatchStatus`、`get_watch_status` | 已实现并测试 |
+| NFR-03 typed 诊断 | Persistence Public API | `WatchStatus`、`OutboxDiagnostic`、`DeliveryAttemptDiagnostic` 与 bounded keyset query | 已实现并测试 |
+| NFR-08 中文文档可用性 | Documentation Contract | `.zh-CN.md` 配对、双向链接、英文术语保留、MANIFEST 动态检查、实际 sdist 配对 | 已实现并测试 |
 | 独立采用验证 | 匿名下游工程 | Public API + Schema | 已完成，证据在下游私有记录 |
 | wheel 构建与隔离导入 | Release 复核 | wheel + 全新 Python 3.12 venv | 已复核通过 |
 | Schema wheel 分发 | 打包边界 | 0.2.0 候选 wheel 包含 package resource | 已实现并测试，尚未发布 |
@@ -763,6 +788,12 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 2. 模块边界、依赖或关键机制变化：更新架构设计；
 3. 文件、类、Schema、配置、运行、测试、部署或发布方式变化：更新本技术方案；
 4. 下游接入方式变化：更新采用指南；
-5. Public API 或事件契约变化：同时更新版本与兼容说明。
+5. Public API 或事件契约变化：同时更新版本与兼容说明；
+6. 仓库任意源码目录中由本仓库维护且面向人的英文 Markdown 变化：在同一变更中同步 `.zh-CN.md`，
+   保留 Public API、Protocol、状态值、Command、File Path 和关键英文术语，并保持双向语言入口；
+7. 新增源码目录或文档子目录：仍必须接受全仓库递归双语配对、Relative Link 和术语检查，不能通过
+   目录层级绕过；生成的 Build Output、工具 Cache 和第三方 Metadata 明确排除；
+8. `.zh-CN.md` 必须包含中文正文；测试同时校验中文字符与可检索的关键 English terms，防止纯英文
+   副本冒充中文版本。
 
 不得只更新代码而让落地方案失真，也不得只写未来方案却标记为当前已实现。
