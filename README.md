@@ -14,6 +14,61 @@ Version status: `v0.1.0` is the latest immutable release. The source tree curren
 unreleased `0.2.0` candidate; do not treat `main` as a release. See the
 [adoption guide](docs/adoption-guide.zh-CN.md) for verified pinning and build instructions.
 
+## What this module is for
+
+Use `watch-engine` when a program must repeatedly observe something, distinguish trustworthy
+evidence from an observation failure, decide whether a real state transition occurred, and keep
+the resulting event until a downstream consumer accepts it. Without a shared engine, every
+monitor tends to reimplement scheduling, last-known-good state, restart recovery, transition
+comparison, event persistence, retry, and duplicate-delivery handling.
+
+```text
+Trigger -> Observer -> Observation -> SQLite evidence
+                         |
+                         +-- VALID -> Authority -> TransitionPolicy
+                                                   |
+                                                   v
+                                             Event + Outbox
+                                                   |
+                                                   v
+                                               EventSink
+```
+
+Examples include watching service health, file readiness, API results, job completion, or a
+business threshold. The adopting application defines how to observe the subject, what the state
+means, which transitions matter, and where events go. `watch-engine` owns the reusable control
+loop and reliability boundary around those decisions.
+
+| Reuse question | Current 0.x answer |
+| --- | --- |
+| What is the value? | Shared scheduling, durable evidence, last-known-good Authority, deterministic transition evaluation, transactional Event/Outbox creation, bounded retry, restart recovery, and lifecycle operations. |
+| What must the adopter provide? | An `Observer`, a domain `TransitionPolicy`, an idempotent `EventSink`, and configuration that composes them into a `WatchDefinition`. |
+| What happens when observation is uncertain? | `DEGRADED` and `FAILED` evidence is retained for diagnosis but never silently becomes a business transition or replaces the last valid Authority. |
+| What is the delivery guarantee? | At-least-once, not exactly-once. A sink must make replay of the same `event_id` harmless. |
+| What must run? | The adopter owns the process loop or supervisor. The current SQLite boundary allows one owning local process and one active dispatcher per database. |
+| What is deliberately absent? | Product-specific scraping/parsing, business-state definitions, notification-provider integrations, a daemon/service manager, distributed coordination, multi-tenant administration, and a web UI. |
+
+Reuse this module when:
+
+- Several monitors would otherwise duplicate the same scheduling, state, persistence, and retry
+  mechanics.
+- A failed or incomplete observation must remain distinct from a confirmed state change.
+- State authority and generated events must survive process restart and remain auditable.
+- A later delivery retry must reuse one stable event identity.
+- A new domain should plug in through `Observer`, `TransitionPolicy`, and `EventSink` rather than
+  add product-specific branches to a shared Core.
+
+Do not use this module when:
+
+- The task is a one-off check and losing its in-memory result is acceptable.
+- A direct, best-effort callback is sufficient and durable state or retry evidence adds no value.
+- Duplicate delivery is unacceptable and the downstream consumer cannot deduplicate by
+  `event_id`.
+- You require multiple concurrent owner processes, distributed leases, high availability, or a
+  shared network database; those are outside the current SQLite design.
+- You expect the library to scrape a particular site, interpret a particular product or business
+  state, manage recipients/templates, or send through a built-in notification Provider.
+
 ## Core concepts
 
 - `WatchDefinition` composes a `Trigger`, `Observer`, `TransitionPolicy`, and observer retry
