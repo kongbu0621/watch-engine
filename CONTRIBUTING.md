@@ -20,6 +20,8 @@ Use synthetic fixtures. Do not include personal information, credentials, privat
 repository names, production URLs, database files, or complete captured responses in commits,
 issues, logs, or pull requests. Report vulnerabilities through `SECURITY.md`.
 
-When changing a human-facing English Markdown document, update its sibling `.zh-CN.md` version in
-the same change. Keep public API names, state values, commands, paths, and important engineering
-terms in English inside the Chinese text so they remain directly searchable and traceable to code.
+When changing a repository-owned, human-facing English Markdown document in any source directory,
+update its sibling `.zh-CN.md` version in the same change. The Chinese file must contain substantive
+Chinese text, not just an English copy under a Chinese filename. Keep public API names, state values,
+commands, paths, and important engineering terms in English inside the Chinese text so they remain
+directly searchable and traceable to code.

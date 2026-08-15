@@ -772,8 +772,11 @@ Tag/Commit 安装。发布负责人必须启用 PyPI 2FA/受信发布、构建�
 3. 文件、类、Schema、配置、运行、测试、部署或发布方式变化：更新本技术方案；
 4. 下游接入方式变化：更新采用指南；
 5. Public API 或事件契约变化：同时更新版本与兼容说明；
-6. 面向人的英文 Markdown 变化：在同一变更中同步 `.zh-CN.md`，保留 Public API、Protocol、状态值、
-   Command、File Path 和关键英文术语，并保持双向语言入口；
-7. 新增文档子目录：仍必须接受递归双语配对、Relative Link 和术语检查，不能通过目录层级绕过。
+6. 仓库任意源码目录中由本仓库维护且面向人的英文 Markdown 变化：在同一变更中同步 `.zh-CN.md`，
+   保留 Public API、Protocol、状态值、Command、File Path 和关键英文术语，并保持双向语言入口；
+7. 新增源码目录或文档子目录：仍必须接受全仓库递归双语配对、Relative Link 和术语检查，不能通过
+   目录层级绕过；生成的 Build Output、工具 Cache 和第三方 Metadata 明确排除；
+8. `.zh-CN.md` 必须包含中文正文；测试同时校验中文字符与可检索的关键 English terms，防止纯英文
+   副本冒充中文版本。
 
 不得只更新代码而让落地方案失真，也不得只写未来方案却标记为当前已实现。

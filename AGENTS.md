@@ -64,10 +64,13 @@ Code, schema, packaging, runtime, deployment, release, or public-contract change
 affected document layer in the same change. Never describe a future plan as already implemented or
 an already published release as pending.
 
-Every human-facing English Markdown document must have a sibling `.zh-CN.md` version and link to
-it. The Chinese version must preserve public API names, protocol names, state values, commands,
-file paths, and important English engineering terms so readers can map the explanation back to
-code and external references. Update both language versions in the same change.
+Every repository-owned, human-facing English Markdown document, in any source directory, must
+have a sibling `.zh-CN.md` version and link to it. Generated build output, tool caches, and
+third-party metadata are not repository documentation. A `.zh-CN.md` file must contain substantive
+Chinese text; an English copy with a Chinese filename is not a Chinese version. The Chinese version
+must preserve public API names, protocol names, state values, commands, file paths, and important
+English engineering terms so readers can map the explanation back to code and external references.
+Update both language versions in the same change.
 
 ## Required checks
 

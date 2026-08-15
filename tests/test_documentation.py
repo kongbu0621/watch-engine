@@ -5,7 +5,28 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
-MARKDOWN_FILES = tuple(sorted((*ROOT.glob("*.md"), *ROOT.glob("docs/**/*.md"))))
+GENERATED_MARKDOWN_PARTS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "build",
+    "dist",
+}
+
+
+def _is_repository_source_markdown(path: Path) -> bool:
+    relative = path.relative_to(ROOT)
+    return not any(
+        part in GENERATED_MARKDOWN_PARTS or part.endswith(".egg-info")
+        for part in relative.parts
+    )
+
+
+MARKDOWN_FILES = tuple(
+    sorted(path for path in ROOT.rglob("*.md") if _is_repository_source_markdown(path))
+)
 REQUIRED_PROGRAM_DOCUMENTS = (
     "module-requirements.zh-CN.md",
     "architecture.zh-CN.md",
@@ -60,12 +81,16 @@ def test_chinese_repository_guidance_preserves_key_english_terms() -> None:
 
 def test_chinese_documents_retain_searchable_english_terms() -> None:
     english_term = re.compile(r"[A-Za-z][A-Za-z0-9_.-]+")
+    chinese_text = re.compile(r"[\u3400-\u9fff]")
     chinese_documents = tuple(
         path for path in MARKDOWN_FILES if path.name.endswith(".zh-CN.md")
     )
     assert chinese_documents
     for document in chinese_documents:
         content = document.read_text(encoding="utf-8")
+        assert chinese_text.search(content), (
+            f"Chinese document contains no Chinese text: {document.relative_to(ROOT)}"
+        )
         assert english_term.search(content), (
             f"Chinese document lost all English terminology: {document.relative_to(ROOT)}"
         )
