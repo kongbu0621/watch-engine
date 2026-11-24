@@ -28,16 +28,16 @@ This diagram covers the complete current 0.x design and its documented extension
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 240}}}%%
 flowchart TD
-    A["Adopter configures WatchDefinition<br/>Choose trigger, observer, policy and sink"]
+    A["Adopter composes observation and delivery<br/>WatchDefinition: trigger, observer and policy<br/>Dispatcher: sink and delivery retry settings"]
     T["Implemented · Trigger / WatchRunner<br/>Interval, Cron, Manual<br/>or direct run_once"]
     X["Unimplemented · Optional triggers<br/>External events, file changes, webhooks"]
     O["Adopter · Observer<br/>Collect observations; bounded exception retries"]
     E["Implemented · Commit Observation first<br/>VALID / DEGRADED / FAILED evidence<br/>Preserve run diagnostics"]
     G["Implemented · Validity and time check<br/>Only a non-stale VALID may promote"]
     P["Implemented · Second SQLite transaction<br/>Evaluate pure TransitionPolicy<br/>Commit Authority, Event and Outbox atomically"]
-    D["Implemented · OutboxDispatcher<br/>One active owner; stable event_id retries<br/>Sink calls outside write transactions"]
+    D["Implemented · OutboxDispatcher<br/>One owner; recover interrupted DELIVERING rows<br/>Stable event_id; sink I/O outside write transactions"]
     S["Adopter · EventSink<br/>Idempotent by event_id<br/>At-least-once delivery may repeat"]
-    R["Implemented · Bounded delivery recovery<br/>Backoff; exhausted events become DEAD<br/>Old owner must exit before replacement"]
+    R["Implemented · Persist delivery confirmation<br/>Only None is a successful sink return<br/>Failures back off; exhausted events become DEAD"]
     H["Implemented · Diagnostics and lifecycle<br/>Read-only status, paginated delivery history<br/>Explicit retention, deletion and compaction"]
     U["Adopter consumes events and continues work<br/>Handle failures using actual delivery status<br/>Diagnostic reads do not start observations"]
     A -->|"Use an existing trigger or run directly"| T
@@ -51,9 +51,9 @@ flowchart TD
     P -->|"Committed events"| D
     P -->|"No events or promotion failure: keep evidence"| H
     D --> S
-    S -->|"Successful return; persist delivery outcome"| U
-    S -->|"Failure"| R
-    R -->|"Retry the same event within limits"| D
+    S -->|"Return value or exception"| R
+    R -->|"Successful confirmation committed"| U
+    R -->|"Bounded failure retry or resume after interruption"| D
     R -->|"Exhausted"| H
     H -->|"Status and diagnostics"| U
     class T,E,G,P,D,R,H built
@@ -66,7 +66,7 @@ flowchart TD
     classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
 
-The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
+The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. Only a `None` sink return followed by committed confirmation records delivery success; other returns are failures. After an acknowledgement error or interruption, the next invocation recovers remaining `DELIVERING` rows. A replacement dispatcher must wait for the old owner to exit. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
 
 
 Examples include watching service health, file readiness, API results, job completion, or a

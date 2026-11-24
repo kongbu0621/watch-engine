@@ -22,16 +22,16 @@
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 240}}}%%
 flowchart TD
-    A["采用方配置 WatchDefinition<br/>选择触发、观测、策略与接收方"]
+    A["采用方组合观测与投递<br/>WatchDefinition：触发、观测与策略<br/>Dispatcher：接收方与投递重试配置"]
     T["已实现 · Trigger / WatchRunner<br/>Interval、Cron、Manual<br/>或直接 run_once"]
     X["待实现 · 可选 Trigger Adapter<br/>外部事件、文件变更、Webhook"]
     O["采用方 · Observer<br/>取得观测；异常按有界策略重试"]
     E["已实现 · 先提交 Observation<br/>VALID / DEGRADED / FAILED 证据<br/>保留运行诊断"]
     G["已实现 · 有效性与时间检查<br/>只有未过时的 VALID 可晋升"]
     P["已实现 · 第二个 SQLite 事务<br/>调用纯 TransitionPolicy<br/>Authority、Event 与 Outbox 原子提交"]
-    D["已实现 · OutboxDispatcher<br/>单活跃拥有者、同 event_id 重试<br/>接收方调用在写事务外"]
+    D["已实现 · OutboxDispatcher<br/>单拥有者；恢复遗留 DELIVERING<br/>同 event_id；接收方调用在写事务外"]
     S["采用方 · EventSink<br/>按 event_id 幂等处理<br/>至少一次投递可能重复"]
-    R["已实现 · 有界投递恢复<br/>退避重试；耗尽为 DEAD<br/>换 Dispatcher 前确认旧拥有者退出"]
+    R["已实现 · 持久保存投递确认<br/>接收方仅返回 None 才算成功<br/>失败退避重试；耗尽为 DEAD"]
     H["已实现 · 诊断与生命周期<br/>只读状态、分页投递记录<br/>显式保留、删除与压缩规则"]
     U["采用方消费事件并继续业务<br/>结合实际投递状态处理失败<br/>诊断查询不触发新的观测"]
     A -->|"使用已有触发或直接运行"| T
@@ -45,9 +45,9 @@ flowchart TD
     P -->|"已提交的事件"| D
     P -->|"无事件或晋升失败：原证据仍保留"| H
     D --> S
-    S -->|"成功返回；持久记录投递结果"| U
-    S -->|"失败"| R
-    R -->|"仍可重试原事件"| D
+    S -->|"返回值或异常"| R
+    R -->|"成功确认已提交"| U
+    R -->|"有界失败重试或中断后接续"| D
     R -->|"耗尽"| H
     H -->|"状态与诊断"| U
     class T,E,G,P,D,R,H built
@@ -60,7 +60,7 @@ flowchart TD
     classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
 
-`TransitionPolicy` 由采用方提供，在第二个写事务内执行，必须快速、纯粹且没有外部副作用。晋升失败只回滚第二个事务，不抹掉第一步已提交的观测；投递失败不回滚 Authority。进程在 Sink 接受后、本地确认前退出仍可能重复投递。分布式调度、Web UI 和进程监督器不在此设计范围，不能把可选 Adapter 画成这些平台能力已经规划落地。
+`TransitionPolicy` 由采用方提供，在第二个写事务内执行，必须快速、纯粹且没有外部副作用。晋升失败只回滚第二个事务，不抹掉第一步已提交的观测；投递失败不回滚 Authority。接收方返回 `None` 且确认提交后才记录投递成功，其他返回值按失败处理。确认异常或中断后，下次调用先恢复剩余 `DELIVERING`；替换 Dispatcher 前必须确认旧拥有者退出。进程在 Sink 接受后、本地确认前退出仍可能重复投递。分布式调度、Web UI 和进程监督器不在此设计范围，不能把可选 Adapter 画成这些平台能力已经规划落地。
 
 
 可复用场景包括服务健康、文件就绪、API 结果、任务完成或业务阈值监控。采用方负责定义“如何取得
