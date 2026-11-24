@@ -23,17 +23,51 @@ the resulting event until a downstream consumer accepts it. Without a shared eng
 monitor tends to reimplement scheduling, last-known-good state, restart recovery, transition
 comparison, event persistence, retry, and duplicate-delivery handling.
 
-```text
-Trigger -> Observer -> Observation -> SQLite evidence
-                         |
-                         +-- VALID -> Authority -> TransitionPolicy
-                                                   |
-                                                   v
-                                             Event + Outbox
-                                                   |
-                                                   v
-                                               EventSink
+This diagram covers the complete current 0.x design and its documented extension points. **Implemented** means present in the current source, not necessarily included in the `v0.1.0` release. **Unimplemented** adapters are optional; gray nodes belong to the adopter. Edges distinguish evidence, promotion, delivery, and diagnostics; a run without events does not require delivery.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
+flowchart TD
+    A["Adopter composes observation and delivery<br/>WatchDefinition: trigger, observer and policy<br/>Dispatcher: sink and delivery retry settings"]
+    T["Implemented · Trigger / WatchRunner<br/>Interval, Cron, Manual<br/>or direct run_once"]
+    X["Unimplemented · Optional triggers<br/>External events, file changes, webhooks"]
+    O["Adopter · Observer<br/>Collect observations; bounded exception retries"]
+    E["Implemented · Commit Observation first<br/>VALID / DEGRADED / FAILED evidence<br/>Preserve run diagnostics"]
+    G["Implemented · Route by observation status<br/>Only VALID enters promotion"]
+    P["Implemented · Second SQLite transaction<br/>Read current Authority and check time inside this transaction<br/>Evaluate pure policy; commit Authority / Event / Outbox atomically"]
+    D["Implemented · OutboxDispatcher<br/>One owner; recover interrupted DELIVERING rows<br/>Stable event_id; sink I/O outside write transactions"]
+    S["Adopter · EventSink<br/>Idempotent by event_id<br/>At-least-once delivery may repeat"]
+    R["Implemented · Persist delivery confirmation<br/>Only None is a successful sink return<br/>Failures back off; exhausted events become DEAD"]
+    H["Implemented · Diagnostics and lifecycle<br/>Read-only status, paginated delivery history<br/>Explicit retention, deletion and compaction"]
+    U["Adopter consumes events and continues work<br/>Handle failures using actual delivery status<br/>Diagnostic reads do not start observations"]
+    A -->|"Use an existing trigger or run directly"| T
+    A -.->|"Optional future adapter"| X
+    T --> O
+    X -.->|"Implement Trigger protocol"| T
+    O --> E
+    E --> G
+    G -->|"VALID"| P
+    G -->|"DEGRADED / FAILED: evidence only"| H
+    P -->|"Committed events"| D
+    P -->|"Stale, no events or promotion failure: keep evidence"| H
+    D --> S
+    S -->|"Return value or exception"| R
+    R -->|"Successful confirmation committed"| U
+    R -->|"Bounded failure retry or resume after interruption"| D
+    R -->|"Exhausted"| H
+    H -->|"Status and diagnostics"| U
+    class T,E,G,P,D,R,H built
+    class X pending
+    class A,O,S external
+    class U outcome
+    classDef built fill:#e8f1fc,stroke:#35689c,color:#102a43
+    classDef pending fill:#fff3d6,stroke:#9a6700,color:#493500,stroke-dasharray:5 3
+    classDef external fill:#f1f3f5,stroke:#6b7280,color:#202938
+    classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
+
+The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Reading the current Authority, checking observation time and promoting share that transaction; the time check is not a separate preflight outside it. With an existing Authority, an equal or older observation remains evidence-only and does not call the policy. A newer valid observation (or the first valid observation) may advance Authority even if the policy emits no events. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. Only a `None` sink return followed by committed confirmation records delivery success; other returns are failures. After an acknowledgement error or interruption, the next invocation recovers remaining `DELIVERING` rows. A replacement dispatcher must wait for the old owner to exit. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
+
 
 Examples include watching service health, file readiness, API results, job completion, or a
 business threshold. The adopting application defines how to observe the subject, what the state
