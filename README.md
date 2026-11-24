@@ -23,17 +23,51 @@ the resulting event until a downstream consumer accepts it. Without a shared eng
 monitor tends to reimplement scheduling, last-known-good state, restart recovery, transition
 comparison, event persistence, retry, and duplicate-delivery handling.
 
-```text
-Trigger -> Observer -> Observation -> SQLite evidence
-                         |
-                         +-- VALID -> Authority -> TransitionPolicy
-                                                   |
-                                                   v
-                                             Event + Outbox
-                                                   |
-                                                   v
-                                               EventSink
+This diagram covers the complete current 0.x design and its documented extension points. **Implemented** means present in the current source, not necessarily included in the `v0.1.0` release. **Unimplemented** adapters are optional; gray nodes belong to the adopter. Edges distinguish evidence, promotion, delivery, and diagnostics; a run without events does not require delivery.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 240}}}%%
+flowchart TD
+    A["Adopter configures WatchDefinition<br/>Choose trigger, observer, policy and sink"]
+    T["Implemented · Trigger / WatchRunner<br/>Interval, Cron, Manual<br/>or direct run_once"]
+    X["Unimplemented · Optional triggers<br/>External events, file changes, webhooks"]
+    O["Adopter · Observer<br/>Collect observations; bounded exception retries"]
+    E["Implemented · Commit Observation first<br/>VALID / DEGRADED / FAILED evidence<br/>Preserve run diagnostics"]
+    G["Implemented · Validity and time check<br/>Only a non-stale VALID may promote"]
+    P["Implemented · Second SQLite transaction<br/>Evaluate pure TransitionPolicy<br/>Commit Authority, Event and Outbox atomically"]
+    D["Implemented · OutboxDispatcher<br/>One active owner; stable event_id retries<br/>Sink calls outside write transactions"]
+    S["Adopter · EventSink<br/>Idempotent by event_id<br/>At-least-once delivery may repeat"]
+    R["Implemented · Bounded delivery recovery<br/>Backoff; exhausted events become DEAD<br/>Old owner must exit before replacement"]
+    H["Implemented · Diagnostics and lifecycle<br/>Read-only status, paginated delivery history<br/>Explicit retention, deletion and compaction"]
+    U["Adopter consumes events and continues work<br/>Handle failures using actual delivery status<br/>Diagnostic reads do not start observations"]
+    A -->|"Use an existing trigger or run directly"| T
+    A -.->|"Optional future adapter"| X
+    T --> O
+    X -.->|"Implement Trigger protocol"| T
+    O --> E
+    E --> G
+    G -->|"Eligible for promotion"| P
+    G -->|"Invalid or stale: evidence only"| H
+    P -->|"Committed events"| D
+    P -->|"No events or promotion failure: keep evidence"| H
+    D --> S
+    S -->|"Successful return; persist delivery outcome"| U
+    S -->|"Failure"| R
+    R -->|"Retry the same event within limits"| D
+    R -->|"Exhausted"| H
+    H -->|"Status and diagnostics"| U
+    class T,E,G,P,D,R,H built
+    class X pending
+    class A,O,S external
+    class U outcome
+    classDef built fill:#e8f1fc,stroke:#35689c,color:#102a43
+    classDef pending fill:#fff3d6,stroke:#9a6700,color:#493500,stroke-dasharray:5 3
+    classDef external fill:#f1f3f5,stroke:#6b7280,color:#202938
+    classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
+
+The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
+
 
 Examples include watching service health, file readiness, API results, job completion, or a
 business threshold. The adopting application defines how to observe the subject, what the state
