@@ -33,8 +33,8 @@ flowchart TD
     X["Unimplemented · Optional triggers<br/>External events, file changes, webhooks"]
     O["Adopter · Observer<br/>Collect observations; bounded exception retries"]
     E["Implemented · Commit Observation first<br/>VALID / DEGRADED / FAILED evidence<br/>Preserve run diagnostics"]
-    G["Implemented · Validity and time check<br/>Only a non-stale VALID may promote"]
-    P["Implemented · Second SQLite transaction<br/>Evaluate pure TransitionPolicy<br/>Commit Authority, Event and Outbox atomically"]
+    G["Implemented · Route by observation status<br/>Only VALID enters promotion"]
+    P["Implemented · Second SQLite transaction<br/>Read current Authority and check time inside this transaction<br/>Evaluate pure policy; commit Authority / Event / Outbox atomically"]
     D["Implemented · OutboxDispatcher<br/>One owner; recover interrupted DELIVERING rows<br/>Stable event_id; sink I/O outside write transactions"]
     S["Adopter · EventSink<br/>Idempotent by event_id<br/>At-least-once delivery may repeat"]
     R["Implemented · Persist delivery confirmation<br/>Only None is a successful sink return<br/>Failures back off; exhausted events become DEAD"]
@@ -46,10 +46,10 @@ flowchart TD
     X -.->|"Implement Trigger protocol"| T
     O --> E
     E --> G
-    G -->|"Eligible for promotion"| P
-    G -->|"Invalid or stale: evidence only"| H
+    G -->|"VALID"| P
+    G -->|"DEGRADED / FAILED: evidence only"| H
     P -->|"Committed events"| D
-    P -->|"No events or promotion failure: keep evidence"| H
+    P -->|"Stale, no events or promotion failure: keep evidence"| H
     D --> S
     S -->|"Return value or exception"| R
     R -->|"Successful confirmation committed"| U
@@ -66,7 +66,7 @@ flowchart TD
     classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
 
-The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. Only a `None` sink return followed by committed confirmation records delivery success; other returns are failures. After an acknowledgement error or interruption, the next invocation recovers remaining `DELIVERING` rows. A replacement dispatcher must wait for the old owner to exit. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
+The adopter supplies `TransitionPolicy`. It runs inside the second write transaction and must be fast, pure, and free of external side effects. Reading the current Authority, checking observation time and promoting share that transaction; the time check is not a separate preflight outside it. With an existing Authority, an equal or older observation remains evidence-only and does not call the policy. A newer valid observation (or the first valid observation) may advance Authority even if the policy emits no events. Promotion failure rolls back only that transaction; the first committed observation remains. Delivery failure cannot roll back Authority. Only a `None` sink return followed by committed confirmation records delivery success; other returns are failures. After an acknowledgement error or interruption, the next invocation recovers remaining `DELIVERING` rows. A replacement dispatcher must wait for the old owner to exit. A crash after sink acceptance but before local acknowledgement can still cause duplicate delivery. Distributed scheduling, a Web UI, and process supervision remain outside this design; optional adapters do not imply those platforms are planned or implemented.
 
 
 Examples include watching service health, file readiness, API results, job completion, or a

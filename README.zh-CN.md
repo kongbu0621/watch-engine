@@ -27,8 +27,8 @@ flowchart TD
     X["待实现 · 可选 Trigger Adapter<br/>外部事件、文件变更、Webhook"]
     O["采用方 · Observer<br/>取得观测；异常按有界策略重试"]
     E["已实现 · 先提交 Observation<br/>VALID / DEGRADED / FAILED 证据<br/>保留运行诊断"]
-    G["已实现 · 有效性与时间检查<br/>只有未过时的 VALID 可晋升"]
-    P["已实现 · 第二个 SQLite 事务<br/>调用纯 TransitionPolicy<br/>Authority、Event 与 Outbox 原子提交"]
+    G["已实现 · 按观测状态分流<br/>仅 VALID 进入晋升路径"]
+    P["已实现 · 第二个 SQLite 事务<br/>在本事务内读取当前 Authority 并核对时间<br/>调用纯策略；Authority / Event / Outbox 原子提交"]
     D["已实现 · OutboxDispatcher<br/>单拥有者；恢复遗留 DELIVERING<br/>同 event_id；接收方调用在写事务外"]
     S["采用方 · EventSink<br/>按 event_id 幂等处理<br/>至少一次投递可能重复"]
     R["已实现 · 持久保存投递确认<br/>接收方仅返回 None 才算成功<br/>失败退避重试；耗尽为 DEAD"]
@@ -40,10 +40,10 @@ flowchart TD
     X -.->|"按 Trigger 协议接入"| T
     O --> E
     E --> G
-    G -->|"可晋升"| P
-    G -->|"无效或过时：仅作证据"| H
+    G -->|"VALID"| P
+    G -->|"DEGRADED / FAILED：仅作证据"| H
     P -->|"已提交的事件"| D
-    P -->|"无事件或晋升失败：原证据仍保留"| H
+    P -->|"过时、无事件或晋升失败：保留原证据"| H
     D --> S
     S -->|"返回值或异常"| R
     R -->|"成功确认已提交"| U
@@ -60,7 +60,7 @@ flowchart TD
     classDef outcome fill:#e6f4ea,stroke:#33734a,color:#173d26
 ```
 
-`TransitionPolicy` 由采用方提供，在第二个写事务内执行，必须快速、纯粹且没有外部副作用。晋升失败只回滚第二个事务，不抹掉第一步已提交的观测；投递失败不回滚 Authority。接收方返回 `None` 且确认提交后才记录投递成功，其他返回值按失败处理。确认异常或中断后，下次调用先恢复剩余 `DELIVERING`；替换 Dispatcher 前必须确认旧拥有者退出。进程在 Sink 接受后、本地确认前退出仍可能重复投递。分布式调度、Web UI 和进程监督器不在此设计范围，不能把可选 Adapter 画成这些平台能力已经规划落地。
+`TransitionPolicy` 由采用方提供，在第二个写事务内执行，必须快速、纯粹且没有外部副作用。读取当前 Authority、比较观测时间和晋升属于同一个事务，不能把时间检查移到事务外。已有 Authority 时，同时间或更旧的观测只保留证据，不调用策略；更新的有效观测（或首次有效观测）即使不产生事件，仍可更新 Authority。晋升失败只回滚第二个事务，不抹掉第一步已提交的观测；投递失败不回滚 Authority。接收方返回 `None` 且确认提交后才记录投递成功，其他返回值按失败处理。确认异常或中断后，下次调用先恢复剩余 `DELIVERING`；替换 Dispatcher 前必须确认旧拥有者退出。进程在 Sink 接受后、本地确认前退出仍可能重复投递。分布式调度、Web UI 和进程监督器不在此设计范围，不能把可选 Adapter 画成这些平台能力已经规划落地。
 
 
 可复用场景包括服务健康、文件就绪、API 结果、任务完成或业务阈值监控。采用方负责定义“如何取得
